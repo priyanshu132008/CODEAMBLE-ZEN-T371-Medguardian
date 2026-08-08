@@ -1,0 +1,28 @@
+cat << 'EOF' > .gitignore
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Dependencies
+node_modules/
+backend/venv/
+venv/
+
+# Build & Cache Outputs
+.next/
+out/
+build/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# System & Editor Files
+.DS_Store
+.vscode/
+.idea/
+backend/uploads/*
+!backend/uploads/.gitkeep
+EOF

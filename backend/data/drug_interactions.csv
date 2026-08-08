@@ -1,0 +1,6 @@
+drug_a,drug_b,type,severity,message
+aspirin,ibuprofen,duplicate,medium,Both are NSAIDs. Taking both together increases the risk of stomach bleeding.
+metformin,amlodipine,interaction,low,Monitor blood sugar closely; Amlodipine can sometimes affect glucose control.
+clopidogrel,omeprazole,interaction,high,Omeprazole can block the blood-thinning effect of Clopidogrel. Contact doctor immediately.
+paracetamol,acetaminophen,duplicate,high,These are the exact same medication under different names. Fatal overdose risk.
+warfarin,aspirin,interaction,high,Combining these medications significantly increases the risk of severe internal bleeding.
