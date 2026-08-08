@@ -58,20 +58,29 @@ client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
 )
 
-# Primary model: a reliable free JSON-producing model via OpenRouter. The
-# free tiers are inconsistent at OpenAI function-calling, so we use plain
+# Primary model: a fast free JSON-producing model via OpenRouter. The free
+# tiers are inconsistent at OpenAI function-calling, so we use plain
 # JSON-in-content prompting and parse the output ourselves (see below).
 # These slugs were verified live against OpenRouter (2026-08-08) — the older
-# `:free` Llama/Gemini-1.5 slugs have been retired and now 404.
-MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
-# Fallback models tried in order if the primary is unavailable / rate-limited
-# / returns unparseable output. Each is a valid OpenRouter model id verified
-# to emit a parseable coded dossier for the bronchitis test case.
+# `:free` Llama/Gemini-1.5/Gemma-2 slugs have been retired and now 404.
+#
+# gemma-4-26b-a4b-it is a 4B-active MoE: ~5s per dossier vs ~64s for
+# gpt-oss-20b / ~30s+ for the 120B Nemotron, so it is the primary to keep the
+# /api/claim/generate request well under the HTTP client timeout. The larger,
+# higher-quality Nemotron models stay as fallbacks for when the primary is
+# unavailable / rate-limited / returns unparseable output.
+MODEL = "google/gemma-4-26b-a4b-it:free"
+# Fallback models tried in order. A per-model timeout (MODEL_TIMEOUT_S) caps
+# each attempt so a single slow/hanging model cannot exhaust the HTTP budget
+# before the fallback chain completes.
 FALLBACK_MODELS = [
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "openai/gpt-oss-20b:free",
-    "google/gemma-4-26b-a4b-it:free",
 ]
+# Hard cap per model attempt. With a 120s HTTP client budget this leaves room
+# for ~2-3 fallback attempts even if the primary hangs to the cap.
+MODEL_TIMEOUT_S = 40
 
 SYSTEM_PROMPT = (
     "You are a Certified Medical Billing & Coding Specialist (AAPC CPC/CCP). "
@@ -286,8 +295,14 @@ async def _call_model(model: str, user_prompt: str):
     Uses plain JSON-in-content prompting (no tool-calling): the free OpenRouter
     models are unreliable at OpenAI function-calling, so we ask for a raw JSON
     object in `message.content` and parse it ourselves.
+
+    The call is wrapped in `asyncio.wait_for(MODEL_TIMEOUT_S)` so a single
+    slow/hanging model raises `asyncio.TimeoutError` (caught by the caller's
+    fallback loop) instead of consuming the entire HTTP client budget and
+    surfacing as an `httpx.ReadTimeout` to the caller before the fallback chain
+    can complete.
     """
-    return await client.chat.completions.create(
+    coro = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -296,6 +311,7 @@ async def _call_model(model: str, user_prompt: str):
         temperature=0.2,
         max_tokens=1500,
     )
+    return await asyncio.wait_for(coro, timeout=MODEL_TIMEOUT_S)
 
 
 async def _generate_dossier(patient_data: dict) -> dict:

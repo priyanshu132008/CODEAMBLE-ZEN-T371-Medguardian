@@ -1,17 +1,13 @@
 /Users/priyanshusawant13/Desktop/CODEAMBLE-ZEN-T371-Medguardian/backend/venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
   warnings.warn(
-INFO:     Started server process [27442]
+INFO:     Started server process [29001]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 [Privacy Sandbox] Scrubbed Payload (teach-back): I have acute bronchitis and I've been prescribed Amoxicillin 500mg to take three times a day (TDS). I am allergic to Penicillin, so I need to watch for any allergic reaction like a rash or swelling. If my breathing gets worse or I get a high fever, I should follow up with my doctor or seek urgent care.
-[Coordinator] Teach-Back complete (comprehension_score=100 >= 70); scheduling Agent 4 background trigger (score=100).
+[Coordinator] Teach-Back complete (comprehension_score=95 >= 70); scheduling Agent 4 background trigger (score=95).
 [1m[Agent 4] Attempting to send emails to priyanshucreator3@gmail.com and priyanshucreator3@gmail.com[0m
 [Coordinator] Background trigger fired → doctor=priyanshucreator3@gmail.com, patient=priyanshucreator3@gmail.com, language=English
 [Coordinator] LLM generation failed (APIConnectionError: Connection error.); using templated fallback body.
 [Coordinator] LLM generation failed (APIConnectionError: Connection error.); using templated fallback body.
 [Coordinator] Background complete: status=sent | both emails delivered via Resend
-INFO:     Shutting down
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-INFO:     Finished server process [27442]

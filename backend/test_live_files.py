@@ -69,8 +69,12 @@ PNG_LINES = [
 ]
 
 # Per-request HTTP timeout — generous because real OCR/LLM calls can take a
-# while (the vision model deadline is 25s; the claim LLM can take ~30s).
-HTTP_TIMEOUT = 120.0
+# while (the vision model deadline is 25s), and the Agent 5 claim engine runs a
+# fallback CHAIN of up to 4 free OpenRouter models, each capped at
+# `MODEL_TIMEOUT_S` (40s) in claim_engine.py. The fast primary (gemma-4-26b
+# MoE, ~5s) normally finishes well under this, but if it is rate-limited the
+# full chain (up to 4 × 40s) needs headroom, so the budget is 180s.
+HTTP_TIMEOUT = 180.0
 
 # ---------------------------------------------------------------------------
 # ANSI color helpers
