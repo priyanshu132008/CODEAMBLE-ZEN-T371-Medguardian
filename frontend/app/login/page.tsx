@@ -30,9 +30,8 @@ import { cn } from '@/lib/utils';
  *   - patient -> /patient
  *   - admin   -> /admin
  *
- * Animated toasts surface every success / failure state. Until the backend
- * auth routes are implemented, `authLogin`/`authRegister` fall back to a mock
- * session so the demo flow is fully navigable.
+ * Animated toasts surface every success / failure state. Email/password
+ * authentication is handled by the real backend Supabase Auth gateway.
  */
 type Mode = 'login' | 'register';
 
@@ -82,6 +81,15 @@ export default function LoginPage() {
       const session = mode === 'login'
         ? await authLogin({ email, password, role })
         : await authRegister({ email, password, role, name: email.split('@')[0] });
+      if (session.email_confirmation_required) {
+        push({
+          type: 'success',
+          title: 'Account created',
+          message: 'Check your email to confirm your account before signing in.',
+        });
+        setSubmitting(false);
+        return;
+      }
       finalizeSession(session, mode === 'login' ? 'Signed in' : 'Account created');
     } catch (err: any) {
       const detail =

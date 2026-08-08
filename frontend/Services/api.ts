@@ -130,12 +130,8 @@ export const generateClaimDossier = async (
 // ---------------------------------------------------------------------------
 // 7. Auth Gateway — Supabase-backed login / register.
 //
-// The teammate's backend exposes `/api/auth/me` (token-validated) but the
-// login/register routes are not yet implemented. These helpers POST to the
-// canonical `/api/auth/{login,register}` paths so they work the moment Supabase
-// auth is wired on the backend. Until then they fall back to a deterministic
-// MOCK session so the multi-page demo (redirects to /patient or /admin) is
-// fully navigable without a backend — without ever breaking a real call.
+// Email/password requests use the real backend and never fall back to a mock
+// session. The separate Google demo remains deferred to Task 3B-3.
 // ---------------------------------------------------------------------------
 
 export type AuthRole = 'patient' | 'admin';
@@ -146,6 +142,7 @@ export interface AuthSession {
   email: string;
   name: string;
   abha_id?: string;
+  email_confirmation_required?: boolean;
   mock?: boolean;
 }
 
@@ -157,40 +154,25 @@ interface AuthPayload {
 }
 
 async function authRequest(path: string, payload: AuthPayload): Promise<AuthSession> {
-  try {
-    const response = await axios.post(`${API_BASE}/auth/${path}`, payload, {
-      // Keep the wait short so a missing backend falls through to the mock
-      // quickly rather than hanging the login button.
-      timeout: 4000,
-    });
-    const d = response.data;
-    return {
-      token: d.access_token || d.token || 'mock-token',
-      role: (d.role || payload.role) as AuthRole,
-      email: d.email || payload.email,
-      name: d.name || payload.name || payload.email.split('@')[0],
-      abha_id: d.abha_id,
-      mock: false,
-    };
-  } catch (err: any) {
-    // Network error / 404 (route not implemented yet) / timeout → mock auth so
-    // the demo flow (role-based redirect) still works. This never throws, so
-    // the login button always resolves to a session.
-    if (err?.response?.status === 401 || err?.response?.status === 403) {
-      // A real backend auth rejection (wrong password) should NOT silently
-      // succeed as mock — only fall back to mock when the route is absent.
-      throw err;
-    }
-    await new Promise((r) => setTimeout(r, 600)); // brief realism
-    return {
-      token: `mock.${payload.role}.${Date.now()}`,
-      role: payload.role,
-      email: payload.email,
-      name: payload.name || payload.email.split('@')[0],
-      abha_id: '12341234123412',
-      mock: true,
-    };
+  const response = await axios.post(`${API_BASE}/auth/${path}`, payload, {
+    timeout: 10000,
+  });
+  const d = response.data ?? {};
+  const accessToken = d.access_token || d.token;
+
+  if (!accessToken && !d.email_confirmation_required) {
+    throw new Error('Authentication did not return an access token.');
   }
+
+  return {
+    token: accessToken || '',
+    role: (d.role || 'patient') as AuthRole,
+    email: d.email || payload.email,
+    name: d.name || payload.email.split('@')[0],
+    abha_id: d.abha_id,
+    email_confirmation_required: Boolean(d.email_confirmation_required),
+    mock: false,
+  };
 }
 
 export const authLogin = (payload: AuthPayload) => authRequest('login', payload);

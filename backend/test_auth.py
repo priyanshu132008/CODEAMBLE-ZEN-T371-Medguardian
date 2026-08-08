@@ -16,12 +16,30 @@ class _FakeAuth:
         self.user = user
         self.error = error
         self.tokens: list[str] = []
+        self.sign_up_payloads: list[dict] = []
+        self.sign_in_payloads: list[dict] = []
+        self.auth_result = SimpleNamespace(
+            user=user,
+            session=SimpleNamespace(access_token="test-access-token"),
+        )
 
     def get_user(self, token: str):
         self.tokens.append(token)
         if self.error is not None:
             raise self.error
         return SimpleNamespace(user=self.user)
+
+    def sign_up(self, credentials: dict):
+        self.sign_up_payloads.append(credentials)
+        if self.error is not None:
+            raise self.error
+        return self.auth_result
+
+    def sign_in_with_password(self, credentials: dict):
+        self.sign_in_payloads.append(credentials)
+        if self.error is not None:
+            raise self.error
+        return self.auth_result
 
 
 class _FakeSupabaseClient:
@@ -37,6 +55,14 @@ class AuthEndpointTests(IsolatedAsyncioTestCase):
             base_url="http://test",
         ) as client:
             return await client.get("/api/auth/me", headers=headers or {})
+
+    async def post(self, path: str, payload: dict):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(path, json=payload)
 
     async def test_missing_authorization_header_returns_401(self):
         response = await self.request()
@@ -80,6 +106,74 @@ class AuthEndpointTests(IsolatedAsyncioTestCase):
             {"user_id": "user-123", "email": "patient@example.com"},
         )
         self.assertEqual(fake_auth.tokens, ["valid-token"])
+
+    async def test_successful_login_returns_access_token_and_safe_role(self):
+        fake_user = SimpleNamespace(id="user-123", email="patient@example.com")
+        fake_auth = _FakeAuth(user=fake_user)
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with patch("app.api.routers.auth.get_supabase_client", return_value=fake_client):
+            response = await self.post(
+                "/api/auth/login",
+                {"email": "patient@example.com", "password": "correct", "role": "admin"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["access_token"], "test-access-token")
+        self.assertEqual(response.json()["token"], "test-access-token")
+        self.assertEqual(response.json()["role"], "patient")
+        self.assertEqual(
+            fake_auth.sign_in_payloads,
+            [{"email": "patient@example.com", "password": "correct"}],
+        )
+
+    async def test_invalid_login_returns_401(self):
+        fake_auth = _FakeAuth(error=ValueError("invalid login credentials"))
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with patch("app.api.routers.auth.get_supabase_client", return_value=fake_client):
+            response = await self.post(
+                "/api/auth/login",
+                {"email": "patient@example.com", "password": "wrong"},
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Invalid email or password.")
+
+    async def test_successful_registration_returns_auth_contract(self):
+        fake_user = SimpleNamespace(id="user-456", email="new@example.com")
+        fake_auth = _FakeAuth(user=fake_user)
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with patch("app.api.routers.auth.get_supabase_client", return_value=fake_client):
+            response = await self.post(
+                "/api/auth/register",
+                {"email": "new@example.com", "password": "correct", "role": "admin"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["access_token"], "test-access-token")
+        self.assertEqual(response.json()["role"], "patient")
+        self.assertEqual(
+            fake_auth.sign_up_payloads,
+            [{"email": "new@example.com", "password": "correct"}],
+        )
+
+    async def test_registration_error_returns_conflict(self):
+        fake_auth = _FakeAuth(error=ValueError("User already registered"))
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with patch("app.api.routers.auth.get_supabase_client", return_value=fake_client):
+            response = await self.post(
+                "/api/auth/register",
+                {"email": "existing@example.com", "password": "correct"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            "An account with this email already exists.",
+        )
 
 
 if __name__ == "__main__":
