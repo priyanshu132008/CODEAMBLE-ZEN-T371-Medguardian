@@ -29,6 +29,7 @@ from agents.voice_utils import generate_tts, transcribe_stt, SarvamUnavailableEr
 from agents.document_intelligence import extract_discharge
 from agents.privacy_sandbox import PIIScrubber
 from agents.coordinator_engine import dispatch_care_coordination
+from agents.claim_engine import generate_claim_dossier
 
 app = FastAPI(title="MedGuardian API", version="0.1.0")
 
@@ -36,6 +37,36 @@ app = FastAPI(title="MedGuardian API", version="0.1.0")
 # this PII scrubber before it reaches any external cloud LLM. Shared instance
 # so the in-memory redaction map persists across requests for the demo.
 _pii_scrubber = PIIScrubber()
+
+# Keys whose string values are treated as patient names to explicitly redact
+# (the regex scrubber cannot catch arbitrary names, so callers collect any
+# known names from the request context and pass them to anonymize_payload).
+_NAME_KEYS = {"patient_name", "name", "full_name", "patient"}
+
+
+def _collect_names(*payloads) -> List[str]:
+    """Recursively collect candidate patient names from arbitrary payloads.
+
+    Walks dicts/lists looking for name-like keys ("patient_name", "name",
+    "full_name", "patient") with non-empty string values. Used to feed the
+    Privacy Sandbox's explicit name-redaction across all LLM-bound endpoints.
+    """
+    names: List[str] = []
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k.lower() in _NAME_KEYS and isinstance(v, str) and v.strip():
+                    names.append(v.strip())
+                elif isinstance(v, (dict, list)):
+                    _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    for p in payloads:
+        _walk(p)
+    return names
 
 # Allow all origins for seamless presentation/local development.
 app.add_middleware(
@@ -88,6 +119,11 @@ class CoordinatorTriggerRequest(BaseModel):
     language: str = "English"
 
 
+class ClaimGenerateRequest(BaseModel):
+    patient_data: dict
+    patient_email: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -101,10 +137,26 @@ def safety_check(request: SafetyCheckRequest) -> SafetyCheckResponse:
 
 
 # ---------------------------------------------------------------------------
-# Document Upload / OCR Intake (Agent 1 — vision extraction via OpenRouter)
+# Document Upload / OCR Intake (Agent 1 & 2 — vision extraction + safety check)
 # ---------------------------------------------------------------------------
 
 UPLOAD_ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
+
+
+def _run_safety_check_from_extracted(extracted: dict) -> List[dict]:
+    """Run Agent 2 (rule-based safety check) over the medications extracted by
+    Agent 1, returning the flags as plain dicts so they slot directly into the
+    shared JSON contract's `safety_flags` array. Tolerates malformed med rows
+    from OCR by skipping anything that won't validate.
+    """
+    medications: List[Medication] = []
+    for m in extracted.get("medications", []) or []:
+        try:
+            medications.append(Medication(**m))
+        except Exception:  # noqa: BLE001 — skip a badly-shaped OCR row
+            continue
+    flags = run_safety_check(medications)
+    return [f.model_dump() for f in flags]
 
 
 @app.post("/api/upload")
@@ -136,10 +188,16 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
             detail=f"OCR extraction failed: {exc}",
         ) from exc
 
+    # Agent 2: run the rule-based safety cross-check on the extracted
+    # medications so the upload output is a complete Agent 1 & 2 contract —
+    # the exact shape required as input by /api/teach-back, /api/coordinator/
+    # trigger, and /api/claim/generate.
+    safety_flags = _run_safety_check_from_extracted(extracted)
+
     return {
         "patient_id": str(uuid.uuid4()),
         "extracted": extracted,
-        "safety_flags": [],
+        "safety_flags": safety_flags,
         "teach_back": {
             "questions_asked": [],
             "patient_responses": [],
@@ -162,8 +220,11 @@ COMPREHENSION_PASS_THRESHOLD = 70
 TEACH_BACK_MIN_QUESTIONS_FOR_HANDOFF = 3
 
 # Demo fallback recipients used when the session does not supply real emails.
-DEMO_PATIENT_EMAIL = os.getenv("DEMO_PATIENT_EMAIL", "patient.demo@medguardian.app")
-DEMO_DOCTOR_EMAIL = os.getenv("DEMO_DOCTOR_EMAIL", "doctor.demo@medguardian.app")
+# Defaults to the verified Resend sandbox delivery address so Agent 4's
+# auto-triggered emails actually deliver during the live demo (the sandbox
+# sender only delivers to the account owner's verified inbox).
+DEMO_PATIENT_EMAIL = os.getenv("DEMO_PATIENT_EMAIL", "priyanshucreator3@gmail.com")
+DEMO_DOCTOR_EMAIL = os.getenv("DEMO_DOCTOR_EMAIL", "priyanshucreator3@gmail.com")
 
 
 def _teach_back_is_complete(updated_state: dict) -> Tuple[bool, str]:
@@ -188,6 +249,9 @@ async def _run_coordinator_in_background(
     coordinator outage can never break the teach-back flow.
     """
     try:
+        # Bold target log so we can visually confirm the correct verified
+        # delivery address in the terminal during the live demo.
+        print(f"\033[1m[Agent 4] Attempting to send emails to {patient_email} and {doctor_email}\033[0m")
         print(
             f"[Coordinator] Background trigger fired → doctor={doctor_email}, "
             f"patient={patient_email}, language={language}"
@@ -215,8 +279,13 @@ async def teach_back(request: TeachBackRequest) -> dict:
     are generated without blocking this response to the UI.
     """
     # Privacy Sandbox — scrub PII from the patient's free-text response before
-    # it is sent to the external teach-back LLM.
-    scrubbed_response = _pii_scrubber.anonymize_payload(request.patient_response)
+    # it is sent to the external teach-back LLM. Collect any known patient
+    # name from the request context so it is explicitly redacted (regex can't
+    # catch arbitrary names).
+    names = _collect_names(request.extracted, request.current_teach_back)
+    scrubbed_response = _pii_scrubber.anonymize_payload(
+        request.patient_response, names=names
+    )
     print(f"[Privacy Sandbox] Scrubbed Payload (teach-back): {scrubbed_response}")
     updated_state = await evaluate_teach_back(
         extracted_data=request.extracted,
@@ -281,26 +350,33 @@ async def voice_chat(
     # Step 1: Process STT
     audio_bytes = await file.read()
     patient_text = await transcribe_stt(audio_bytes)
-    
+
     # Parse incoming form payloads
     extracted_data = json.loads(extracted_json)
     current_state = json.loads(current_state_json)
-    
-    # Step 2: Route directly through Agent 3 Core
+
+    # Privacy Sandbox — scrub PII from the transcription before it reaches the
+    # external teach-back LLM. Collect any known patient name from the session
+    # context so it is explicitly redacted alongside regex PII.
+    names = _collect_names(extracted_data, current_state)
+    scrubbed_text = _pii_scrubber.anonymize_payload(patient_text, names=names)
+    print(f"[Privacy Sandbox] Scrubbed Payload (voice/chat): {scrubbed_text}")
+
+    # Step 2: Route directly through Agent 3 Core (with the scrubbed transcript)
     updated_state = await evaluate_teach_back(
         extracted_data=extracted_data,
         current_teach_back_state=current_state,
-        new_patient_response=patient_text,
+        new_patient_response=scrubbed_text,
     )
-    
+
     # Step 3: Automatically generate TTS audio for the agent's new question feedback
     # Extracts the latest question string or falls back cleanly
     latest_question = updated_state.get("questions_asked", ["Thank you for completing the verification."])[-1]
     audio_base64 = await generate_tts(latest_question, "en-IN")
-    
+
     return {
         "status": "success",
-        "transcription": patient_text,
+        "transcription": scrubbed_text,
         "updated_state": updated_state,
         "audio_base64": audio_base64
     }
@@ -409,5 +485,28 @@ async def coordinator_trigger(request: CoordinatorTriggerRequest) -> dict:
         patient_email=request.patient_email,
         doctor_email=request.doctor_email,
         language=request.language,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Auto-Claim & Insurance Justification Engine
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/claim/generate")
+async def claim_generate(request: ClaimGenerateRequest) -> dict:
+    """Generate the insurance claim justification dossier for a discharge.
+
+    Runs the clinical context through the Privacy Sandbox, then a Certified
+    Medical Billing & Coding Specialist persona (OpenRouter: Claude 3.5
+    Sonnet, fallback Gemini 1.5 Pro) produces a strict-JSON dossier. Returns
+    the JSON dossier plus a rendered HTML Claim Summary Report so the hospital
+    UI can render it immediately, and emails a transparent claim-status copy
+    to the patient.
+    """
+    result = await generate_claim_dossier(
+        patient_data=request.patient_data,
+        patient_email=request.patient_email,
     )
     return result

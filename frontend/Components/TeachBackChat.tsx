@@ -59,10 +59,18 @@ interface TeachBackChatProps {
   extractedData: any;
   demoMode: boolean;
   onVoiceChange?: (active: boolean, status: string) => void;
+  // Bubbles the live teach-back contract state up to the parent so downstream
+  // agents (e.g. Agent 5 claim dossier) can use the comprehension score.
+  onTeachBackChange?: (state: {
+    questions_asked: string[];
+    patient_responses: string[];
+    understanding_score: number;
+    corrections_given: string[];
+  }) => void;
 }
 
 const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
-  ({ extractedData, demoMode, onVoiceChange }, ref) => {
+  ({ extractedData, demoMode, onVoiceChange, onTeachBackChange }, ref) => {
     const [chat, setChat] = useState({
       questions: ["Can you tell me how you will take your Metformin?"],
       responses: [] as string[],
@@ -91,6 +99,19 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
     // Keep the latest chat snapshot for building teach-back payloads.
     const chatRef = useRef(chat);
     useEffect(() => { chatRef.current = chat; }, [chat]);
+
+    // Bubble the live teach-back contract state up to the parent whenever it
+    // changes, so downstream agents (Agent 5 claim dossier) can read the
+    // comprehension score. Parent is expected to memoize the callback.
+    useEffect(() => {
+      if (!onTeachBackChange) return;
+      onTeachBackChange({
+        questions_asked: chat.questions,
+        patient_responses: chat.responses,
+        understanding_score: chat.score ?? 0,
+        corrections_given: chat.corrections,
+      });
+    }, [chat, onTeachBackChange]);
 
     const reportVoice = useCallback((active: boolean, status: string) => {
       if (onVoiceChange) onVoiceChange(active, status);
@@ -291,13 +312,30 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
             <h3 className="font-black text-white text-base tracking-tight">Interactive Patient Teach-Back Loop</h3>
             <p className="text-[11px] font-mono text-slate-400">AGENT 3 VERIFIER CORE • TARGET POST ROUTE: /api/teach-back</p>
           </div>
-          {chat.score && (
+          {chat.score != null && (
             <div className="bg-purple-500/10 border border-purple-500/30 px-3 py-1.5 rounded-xl text-center">
               <span className="text-[9px] font-black tracking-widest text-purple-400 block uppercase">Metrics Score</span>
               <span className="text-lg font-black text-white">{chat.score}%</span>
             </div>
           )}
         </div>
+
+        {/* Agent 4 visual indicator — the backend auto-dispatches care
+            coordination to the doctor + patient once comprehension crosses the
+            handoff threshold (70). Subtle, non-blocking success badge. */}
+        {chat.score != null && chat.score >= 70 && (
+          <div className="px-5 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 flex items-center gap-2.5">
+            <span className="text-base leading-none">✅</span>
+            <div className="flex flex-col">
+              <span className="text-[11px] font-black text-emerald-300 tracking-tight leading-tight">
+                Care Coordination Dispatched to Doctor &amp; Patient
+              </span>
+              <span className="text-[9px] font-mono text-emerald-500/70 tracking-tight">
+                AGENT 4 AUTO-TRIGGER · /api/coordinator/trigger · comprehension ≥ 70%
+              </span>
+            </div>
+          </div>
+        )}
 
         <div className="flex-1 p-5 overflow-y-auto space-y-4 bg-slate-950/20 font-medium text-xs">
           {chat.questions.map((q, idx) => (

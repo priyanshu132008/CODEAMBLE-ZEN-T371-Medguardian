@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import PresentationSlides from '../Components/PresentationSlides';
 import SafetyBanner from '../Components/SafetyBanner';
 import Dashboard from '../Components/Dashboard';
 import TeachBackChat from '../Components/TeachBackChat';
 import ScrollReveal from '../Components/ScrollReveal';
 import UploadZone from '../Components/UploadZone';
+import ClaimDossier from '../Components/ClaimDossier';
 
 export default function Home() {
   // Default to live API mode — the real Agent 1/2/3 pipeline runs out of the box.
@@ -14,6 +15,13 @@ export default function Home() {
 
   // Real Agent 1 OCR output (the `extracted` object from the contract).
   const [extractedData, setExtractedData] = useState<any>(null);
+  // Full shared contract state from /api/upload (Agent 1 + 2): patient_id,
+  // extracted, safety_flags, teach_back, language. Kept so downstream agents
+  // (4 & 5) receive the complete dossier, not just the extracted block.
+  const [fullState, setFullState] = useState<any>(null);
+  // Live Agent 3 teach-back state, bubbled up from TeachBackChat so the Agent 5
+  // claim dossier can include the comprehension score.
+  const [teachBackState, setTeachBackState] = useState<any>(null);
 
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState('Click to begin voice streaming');
@@ -26,9 +34,16 @@ export default function Home() {
     teachBackRef.current?.toggleVoice();
   };
 
-  const handleExtracted = (extracted: any) => {
+  const handleExtracted = (extracted: any, full: any) => {
     setExtractedData(extracted);
+    setFullState(full);
+    setTeachBackState(full?.teach_back ?? null);
   };
+
+  // Memoized so TeachBackChat's bubbling effect doesn't loop.
+  const handleTeachBackChange = useCallback((state: any) => {
+    setTeachBackState(state);
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 antialiased font-sans flex flex-col pb-12">
@@ -145,11 +160,24 @@ export default function Home() {
                       setIsVoiceActive(active);
                       if (status) setVoiceStatus(status);
                     }}
+                    onTeachBackChange={handleTeachBackChange}
                   />
                 </ScrollReveal>
               </div>
 
             </div>
+
+            {/* Agent 5 — Hospital Admin Auto-Claim (sits below the Teach-Back
+                workspace). Gated on Agent 1 extraction; uses the live teach-back
+                score + safety flags in the generated insurance dossier. */}
+            <ScrollReveal>
+              <ClaimDossier
+                extractedData={extractedData}
+                safetyFlags={fullState?.safety_flags ?? []}
+                teachBackState={teachBackState ?? undefined}
+                language={fullState?.language ?? 'en'}
+              />
+            </ScrollReveal>
           </>
         )}
       </main>
