@@ -27,6 +27,25 @@ def _unauthorized() -> HTTPException:
     )
 
 
+def _extract_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise _unauthorized()
+
+    token = credentials.credentials.strip()
+    if not token or any(character.isspace() for character in token):
+        raise _unauthorized()
+    return token
+
+
+def get_current_access_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> str:
+    """Return the syntactically valid bearer token from the current request."""
+    return _extract_bearer_token(credentials)
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> AuthenticatedUser:
@@ -36,12 +55,7 @@ def get_current_user(
     client-provided token is never treated as a patient identifier, and no
     patient ownership decision is made here.
     """
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise _unauthorized()
-
-    token = credentials.credentials.strip()
-    if not token or any(character.isspace() for character in token):
-        raise _unauthorized()
+    token = _extract_bearer_token(credentials)
 
     try:
         response = get_supabase_client().auth.get_user(token)

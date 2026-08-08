@@ -48,6 +48,7 @@ if _resend_key:
     resend.api_key = _resend_key
 
 from agents.privacy_sandbox import PIIScrubber
+from agents.compliance_guard import prepare_agent_context, prepare_clinical_payload
 
 # ---------------------------------------------------------------------------
 # Local Mistral proxy client (OpenAI-compatible). Configurable via env so the
@@ -106,10 +107,14 @@ def _scrub_doctor_context(patient_data: dict) -> str:
     (regex can't catch arbitrary names) alongside the regex patterns that catch
     phones, emails, and project identifiers — one canonical redaction path.
     """
-    context = json.dumps(patient_data, ensure_ascii=False, indent=2)
     name = _patient_name(patient_data)
     names = [name] if name else None
-    return _scrubber.anonymize_payload(context, names=names)
+    guarded_context = prepare_agent_context(
+        patient_data,
+        names=names,
+        scrubber=_scrubber,
+    )
+    return json.dumps(guarded_context, ensure_ascii=False, indent=2)
 
 
 def _build_doctor_prompt(patient_data: dict) -> str:
@@ -135,6 +140,11 @@ def _build_doctor_prompt(patient_data: dict) -> str:
 
 def _build_patient_prompt(patient_data: dict, language: str) -> str:
     extracted = _safe_get(patient_data, "extracted") or {}
+    extracted = prepare_clinical_payload(
+        extracted,
+        names=[_patient_name(patient_data)] if _patient_name(patient_data) else None,
+        scrubber=_scrubber,
+    )
     diagnosis = extracted.get("diagnosis", "their reported condition")
     medications = extracted.get("medications", [])
     meds_summary = (

@@ -1,22 +1,30 @@
-"""Patients registry route for the Hospital Admin Command Center.
+"""Patient routes for the Admin Command Center and the authenticated patient.
 
-Serves the post-discharge patient cohort to the admin console from the live
-Supabase ``patients`` table when configured (``SUPABASE_URL`` + publishable/
-anon key in the environment).
+Two endpoints share this router (prefix ``/api/patients``):
 
-No fake seed data is ever returned. If Supabase is not configured, or the
-table is empty, the route returns an empty list and an honest ``source`` field
-("supabase" when the DB query ran, "unconfigured" when Supabase isn't wired)
-so the admin console renders a proper empty state rather than fabricated
-patients.
+- ``GET /api/patients``     — the post-discharge cohort listing for the admin
+  console, served from the live Supabase ``patients`` table. No fake seed data
+  is ever returned: if Supabase is not configured, or the table is empty, the
+  route returns an empty list with an honest ``source`` field ("supabase" when
+  the DB query ran, "unconfigured" when Supabase isn't wired) so the admin
+  console renders a proper empty state rather than fabricated patients.
+- ``GET /api/patients/me``  — the authenticated patient's own profile, looked
+  up by the user id encoded in the bearer access token.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.dependencies import (
+    AuthenticatedUser,
+    get_current_access_token,
+    get_current_user,
+)
 from app.db.supabase_client import get_supabase_client
+from app.schemas.patients import PatientProfile
+from app.services.patient_service import get_patient_profile
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
@@ -61,3 +69,21 @@ def list_patients() -> Dict[str, Any]:
         # Configured but the query failed (table missing, network, etc.).
         # Still no fake data — surface an empty registry to the admin.
         return {"patients": [], "source": "supabase", "count": 0}
+
+
+@router.get("/me", response_model=PatientProfile)
+def get_my_patient_profile(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    access_token: str = Depends(get_current_access_token),
+) -> PatientProfile:
+    """Return the patient row identified by the authenticated user ID."""
+    patient = get_patient_profile(
+        user_id=current_user.user_id,
+        access_token=access_token,
+    )
+    if patient is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No patient record found for the authenticated user.",
+        )
+    return patient

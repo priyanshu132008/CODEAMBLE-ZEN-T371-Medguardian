@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routers import (
     auth_router,
     health_router,
+    patients_router,
     safety_router,
     teach_back_router,
     upload_router,
@@ -23,6 +24,7 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(patients_router)
 app.include_router(safety_router)
 app.include_router(teach_back_router)
 app.include_router(upload_router)
