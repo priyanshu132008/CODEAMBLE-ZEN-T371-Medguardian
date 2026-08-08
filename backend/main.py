@@ -26,8 +26,14 @@ from agents.safety_check import (
 from agents.teach_back import evaluate_teach_back
 from agents.voice_utils import generate_tts, transcribe_stt, SarvamUnavailableError
 from agents.document_intelligence import extract_discharge
+from agents.privacy_sandbox import PIIScrubber
 
 app = FastAPI(title="MedGuardian API", version="0.1.0")
+
+# Privacy Sandbox — every patient-facing free-text input is scrubbed through
+# this PII scrubber before it reaches any external cloud LLM. Shared instance
+# so the in-memory redaction map persists across requests for the demo.
+_pii_scrubber = PIIScrubber()
 
 # Allow all origins for seamless presentation/local development.
 app.add_middleware(
@@ -137,10 +143,14 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
 @app.post("/api/teach-back")
 async def teach_back(request: TeachBackRequest) -> dict:
     """Evaluate a patient's teach-back text response and return the updated state."""
+    # Privacy Sandbox — scrub PII from the patient's free-text response before
+    # it is sent to the external teach-back LLM.
+    scrubbed_response = _pii_scrubber.anonymize_payload(request.patient_response)
+    print(f"[Privacy Sandbox] Scrubbed Payload (teach-back): {scrubbed_response}")
     updated_state = await evaluate_teach_back(
         extracted_data=request.extracted,
         current_teach_back_state=request.current_teach_back,
-        new_patient_response=request.patient_response,
+        new_patient_response=scrubbed_response,
     )
     return updated_state
 
@@ -222,7 +232,11 @@ async def voice_stt(file: UploadFile) -> dict:
             status_code=exc.status_code,
             content={"error": exc.user_message},
         )
-    return {"text": transcript}
+    # Privacy Sandbox — scrub PII from the transcript before it is returned /
+    # forwarded to any downstream cloud processing.
+    scrubbed_transcript = _pii_scrubber.anonymize_payload(transcript)
+    print(f"[Privacy Sandbox] Scrubbed Payload (voice/stt): {scrubbed_transcript}")
+    return {"text": scrubbed_transcript}
 
 
 # ---------------------------------------------------------------------------
