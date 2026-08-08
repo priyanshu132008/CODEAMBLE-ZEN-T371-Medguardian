@@ -25,7 +25,8 @@ Every endpoint must conform to this exact state object.
     ],
     "precautions": ["string"],
     "follow_up_date": "string",
-    "warning_signs": ["string"]
+    "warning_signs": ["string"],
+    "allergies": ["string"]
   },
   "safety_flags": [
     {
@@ -33,6 +34,13 @@ Every endpoint must conform to this exact state object.
       "medications_involved": ["string"],
       "severity": "low | medium | high",
       "message": "string"
+    },
+    {
+      "type": "allergy_conflict",
+      "severity": "CRITICAL",
+      "message": "string",
+      "medication": "string",
+      "allergy": "string"
     }
   ],
   "teach_back": {

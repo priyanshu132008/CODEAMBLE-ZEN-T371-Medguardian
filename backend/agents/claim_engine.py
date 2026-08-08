@@ -58,10 +58,20 @@ client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
 )
 
-# Primary model: OpenAI GPT-OSS 20B (free tier) via OpenRouter.
-MODEL = "openai/gpt-oss-20b:free"
-# Fallback model if the primary is unavailable / rate-limited.
-FALLBACK_MODEL = "google/gemini-1.5-flash"
+# Primary model: a reliable free JSON-producing model via OpenRouter. The
+# free tiers are inconsistent at OpenAI function-calling, so we use plain
+# JSON-in-content prompting and parse the output ourselves (see below).
+# These slugs were verified live against OpenRouter (2026-08-08) — the older
+# `:free` Llama/Gemini-1.5 slugs have been retired and now 404.
+MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+# Fallback models tried in order if the primary is unavailable / rate-limited
+# / returns unparseable output. Each is a valid OpenRouter model id verified
+# to emit a parseable coded dossier for the bronchitis test case.
+FALLBACK_MODELS = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openai/gpt-oss-20b:free",
+    "google/gemma-4-26b-a4b-it:free",
+]
 
 SYSTEM_PROMPT = (
     "You are a Certified Medical Billing & Coding Specialist (AAPC CPC/CCP). "
@@ -182,10 +192,26 @@ def _strip_json_fences(text: str) -> str:
 def _parse_json_response(text: str) -> dict:
     """Tolerantly parse the model's raw text response into a dict.
 
-    Strips markdown fences, extracts the first balanced JSON object, and falls
-    back to single→double quote normalization if strict parsing fails.
+    Free OpenRouter models frequently wrap the JSON in markdown fences or
+    surround it with conversational prose ("Here is the dossier:\\n```json
+    {...}```\\nLet me know if..."). We forcibly extract the outermost {...}
+    blob with a greedy DOTALL regex — completely ignoring any garbage or
+    markdown before/after the JSON — strip stray fences, then ``json.loads``
+    with a single→double quote fallback.
     """
-    blob = _strip_json_fences(text)
+    if not text:
+        return {}
+    # 1. Aggressive greedy extraction of the outermost JSON object, ignoring
+    #    any conversational garbage or markdown before/after it.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        blob = match.group(0)
+    else:
+        # No brace-delimited span — fall back to the fence-stripping path.
+        blob = _strip_json_fences(text)
+    # Strip any stray ``` / ```json fences the model may have left inside the
+    # captured span, then trim.
+    blob = re.sub(r"```(?:json)?", "", blob, flags=re.IGNORECASE).strip()
     if not blob:
         return {}
     try:
@@ -268,7 +294,7 @@ async def _call_model(model: str, user_prompt: str):
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
-        max_tokens=800,
+        max_tokens=1500,
     )
 
 
@@ -282,7 +308,7 @@ async def _generate_dossier(patient_data: dict) -> dict:
     user_prompt = _build_user_prompt(patient_data)
 
     last_exc: Exception | None = None
-    for model in (MODEL, FALLBACK_MODEL):
+    for model in (MODEL, *FALLBACK_MODELS):
         try:
             completion = await _call_model(model, user_prompt)
             content = completion.choices[0].message.content or ""
