@@ -30,8 +30,10 @@ from agents.document_intelligence import extract_discharge
 from agents.privacy_sandbox import PIIScrubber
 from agents.coordinator_engine import dispatch_care_coordination
 from agents.claim_engine import generate_claim_dossier
+from app.api.routers.auth import router as auth_router
 
 app = FastAPI(title="MedGuardian API", version="0.1.0")
+app.include_router(auth_router)
 
 # Privacy Sandbox — every patient-facing free-text input is scrubbed through
 # this PII scrubber before it reaches any external cloud LLM. Shared instance
