@@ -16,6 +16,9 @@ cryptography==49.0.0
 deprecation==2.1.0
 distro==1.9.0
 docstring_parser==0.18.0
+# Lets Pydantic v2 evaluate PEP 604 union annotations (e.g. `str | None`)
+# used in the app/ package models on Python 3.9 (native support is 3.10+).
+eval_type_backport==0.4.0
 exceptiongroup==1.3.1
 fastapi==0.128.8
 frozenlist==1.8.0
@@ -64,7 +67,6 @@ typing_extensions==4.16.0
 tzdata==2026.3
 urllib3==2.6.3
 uvicorn==0.39.0
-uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
 yarl==1.22.0

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import (
+    auth_router,
     health_router,
     safety_router,
     teach_back_router,
@@ -21,6 +22,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(safety_router)
 app.include_router(teach_back_router)
 app.include_router(upload_router)
