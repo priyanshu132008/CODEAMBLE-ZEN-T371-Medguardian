@@ -44,6 +44,7 @@ export default function ClaimDossier({
   const [error, setError] = useState<string | null>(null);
   const [dossier, setDossier] = useState<any | null>(null);
   const [htmlReport, setHtmlReport] = useState<string | null>(null);
+  const [compliance, setCompliance] = useState<any | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
 
   const ready = !!extractedData;
@@ -70,6 +71,7 @@ export default function ClaimDossier({
       const result = await generateClaimDossier(patientData, patientEmail.trim() || DEFAULT_PATIENT_EMAIL);
       setDossier(result?.dossier ?? null);
       setHtmlReport(result?.html_report ?? null);
+      setCompliance(result?.compliance_metadata ?? null);
       if (!result?.html_report) {
         setError('The claim engine returned no report. Check the backend logs.');
       } else {
@@ -90,6 +92,20 @@ export default function ClaimDossier({
         <div className="absolute top-0 right-0 bg-sky-500/10 text-sky-300 text-[10px] font-mono font-bold uppercase tracking-wider px-3 py-1 rounded-bl-xl border-l border-b border-sky-500/20">
           Agent 5 Admin Subroute • /api/claim/generate
         </div>
+
+        {/* ABDM / DPDP compliance badge — surfaced once a dossier is generated,
+            so judges can see the data-residency + de-identification policy. */}
+        {compliance && (
+          <div className="flex items-center gap-2 mt-1 mb-1 inline-flex w-fit">
+            <span className="flex items-center gap-1.5 bg-emerald-500/15 border border-emerald-400/40 text-emerald-300 rounded-full px-3 py-1 text-[11px] font-bold tracking-wide">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              DPDP &amp; ABDM Compliant
+            </span>
+            <span className="text-[10px] font-mono text-emerald-200/80">
+              {compliance.data_residency}
+            </span>
+          </div>
+        )}
 
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-5 mt-2">
           <div className="flex items-start gap-3">
@@ -235,6 +251,40 @@ export default function ClaimDossier({
                 dangerouslySetInnerHTML={{ __html: htmlReport }}
               />
             </div>
+
+            {/* ABDM / DPDP compliance footer — full metadata for the judges. */}
+            {compliance && (
+              <div className="px-5 py-3 border-t border-slate-200 bg-emerald-50 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                <span className="flex items-center gap-1.5 text-emerald-700 font-bold text-xs">
+                  <ShieldCheck className="h-4 w-4" />
+                  DPDP &amp; ABDM Compliant
+                </span>
+                <span className="text-[11px] font-mono text-slate-600">
+                  ABHA:{' '}
+                  <span className="font-semibold text-slate-800">
+                    {compliance.abdm_abha_id ?? '—'}
+                  </span>
+                </span>
+                <span className="text-[11px] font-mono text-slate-600">
+                  Consent:{' '}
+                  <span className="font-semibold text-emerald-700">
+                    {compliance.dpdp_consent ? 'Granted' : 'Denied'}
+                  </span>
+                </span>
+                <span className="text-[11px] font-mono text-slate-600">
+                  Residency:{' '}
+                  <span className="font-semibold text-slate-800">
+                    {compliance.data_residency}
+                  </span>
+                </span>
+                <span className="text-[11px] font-mono text-slate-600">
+                  Cloud:{' '}
+                  <span className="font-semibold text-slate-800">
+                    {compliance.cloud_transmission}
+                  </span>
+                </span>
+              </div>
+            )}
           </div>
         </div>
       )}

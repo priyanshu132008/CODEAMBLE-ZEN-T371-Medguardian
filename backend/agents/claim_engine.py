@@ -58,10 +58,29 @@ client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
 )
 
-# Primary model: OpenAI GPT-OSS 20B (free tier) via OpenRouter.
-MODEL = "openai/gpt-oss-20b:free"
-# Fallback model if the primary is unavailable / rate-limited.
-FALLBACK_MODEL = "google/gemini-1.5-flash"
+# Primary model: a fast free JSON-producing model via OpenRouter. The free
+# tiers are inconsistent at OpenAI function-calling, so we use plain
+# JSON-in-content prompting and parse the output ourselves (see below).
+# These slugs were verified live against OpenRouter (2026-08-08) — the older
+# `:free` Llama/Gemini-1.5/Gemma-2 slugs have been retired and now 404.
+#
+# gemma-4-26b-a4b-it is a 4B-active MoE: ~5s per dossier vs ~64s for
+# gpt-oss-20b / ~30s+ for the 120B Nemotron, so it is the primary to keep the
+# /api/claim/generate request well under the HTTP client timeout. The larger,
+# higher-quality Nemotron models stay as fallbacks for when the primary is
+# unavailable / rate-limited / returns unparseable output.
+MODEL = "google/gemma-4-26b-a4b-it:free"
+# Fallback models tried in order. A per-model timeout (MODEL_TIMEOUT_S) caps
+# each attempt so a single slow/hanging model cannot exhaust the HTTP budget
+# before the fallback chain completes.
+FALLBACK_MODELS = [
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openai/gpt-oss-20b:free",
+]
+# Hard cap per model attempt. With a 120s HTTP client budget this leaves room
+# for ~2-3 fallback attempts even if the primary hangs to the cap.
+MODEL_TIMEOUT_S = 40
 
 SYSTEM_PROMPT = (
     "You are a Certified Medical Billing & Coding Specialist (AAPC CPC/CCP). "
@@ -182,10 +201,26 @@ def _strip_json_fences(text: str) -> str:
 def _parse_json_response(text: str) -> dict:
     """Tolerantly parse the model's raw text response into a dict.
 
-    Strips markdown fences, extracts the first balanced JSON object, and falls
-    back to single→double quote normalization if strict parsing fails.
+    Free OpenRouter models frequently wrap the JSON in markdown fences or
+    surround it with conversational prose ("Here is the dossier:\\n```json
+    {...}```\\nLet me know if..."). We forcibly extract the outermost {...}
+    blob with a greedy DOTALL regex — completely ignoring any garbage or
+    markdown before/after the JSON — strip stray fences, then ``json.loads``
+    with a single→double quote fallback.
     """
-    blob = _strip_json_fences(text)
+    if not text:
+        return {}
+    # 1. Aggressive greedy extraction of the outermost JSON object, ignoring
+    #    any conversational garbage or markdown before/after it.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        blob = match.group(0)
+    else:
+        # No brace-delimited span — fall back to the fence-stripping path.
+        blob = _strip_json_fences(text)
+    # Strip any stray ``` / ```json fences the model may have left inside the
+    # captured span, then trim.
+    blob = re.sub(r"```(?:json)?", "", blob, flags=re.IGNORECASE).strip()
     if not blob:
         return {}
     try:
@@ -260,16 +295,23 @@ async def _call_model(model: str, user_prompt: str):
     Uses plain JSON-in-content prompting (no tool-calling): the free OpenRouter
     models are unreliable at OpenAI function-calling, so we ask for a raw JSON
     object in `message.content` and parse it ourselves.
+
+    The call is wrapped in `asyncio.wait_for(MODEL_TIMEOUT_S)` so a single
+    slow/hanging model raises `asyncio.TimeoutError` (caught by the caller's
+    fallback loop) instead of consuming the entire HTTP client budget and
+    surfacing as an `httpx.ReadTimeout` to the caller before the fallback chain
+    can complete.
     """
-    return await client.chat.completions.create(
+    coro = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
-        max_tokens=800,
+        max_tokens=1500,
     )
+    return await asyncio.wait_for(coro, timeout=MODEL_TIMEOUT_S)
 
 
 async def _generate_dossier(patient_data: dict) -> dict:
@@ -282,7 +324,7 @@ async def _generate_dossier(patient_data: dict) -> dict:
     user_prompt = _build_user_prompt(patient_data)
 
     last_exc: Exception | None = None
-    for model in (MODEL, FALLBACK_MODEL):
+    for model in (MODEL, *FALLBACK_MODELS):
         try:
             completion = await _call_model(model, user_prompt)
             content = completion.choices[0].message.content or ""

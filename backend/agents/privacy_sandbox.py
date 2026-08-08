@@ -39,27 +39,40 @@ REDACTED_MARKER = "[REDACTED_PII]"
 # matches resolve correctly.
 
 _PII_PATTERNS: List[Tuple[str, re.Pattern]] = [
-    # Project-specific identifiers, e.g. "Patient ID: ZEN-T371" or "ID ZEN-T371"
+    # Project-specific identifiers, e.g. "Patient ID: ZEN-T371", "ID ZEN-T371",
+    # "MRN: ZEN-T371", or a bare "ZEN-T371". The descriptive prefix is OPTIONAL
+    # so a bare project ID is still caught, but the distinctive "ZEN-T###" core
+    # is what actually anchors the match — no medication name or English word
+    # contains that token, so clinical text is never falsely redacted here.
     (
         "patient_id",
         re.compile(
-            r"(?i)\b(?:patient\s*id|id|case\s*id|mrn)\s*[:#]?\s*ZEN[-\s]?T\d{3,}\b"
+            r"(?i)\b(?:(?:patient\s*id|case\s*id|mrn|id)\s*[:#]?\s*)?ZEN[-\s]?T\d{3,}\b"
         ),
     ),
-    # Standard Indian phone numbers: +91 followed by 10 digits, or 0 followed by
-    # 10 digits, or a bare 10-digit number starting 6-9. Tolerates spaces/dashes
-    # both after the country/STD prefix and within the 10-digit subscriber
-    # number (e.g. "+91 98765 43210", "098765-43210", "9876543210").
+    # Standard Indian mobile numbers: an optional +91 or 0 prefix, then a 10-digit
+    # subscriber number starting 6-9, with optional single spaces/dashes between
+    # digit groups (e.g. "+91 98765 43210", "098765-43210", "9876543210").
+    #
+    # Tightened with negative lookarounds `(?<!\d)` / `(?!\d)` so the match is
+    # confined to a STANDALONE digit run — it can never latch onto a slice of a
+    # longer number (MRN, timestamp, order ID, account number). And because the
+    # pattern is entirely numeric, it structurally cannot match a medication name
+    # (Clopidogrel, Atorvastatin, Metformin), a dosage, or any English word.
     (
         "indian_phone",
         re.compile(
-            r"(?:\+91[\s-]?)?(?:0[\s-]?)?[6-9](?:\d[\s-]?){8}\d"
+            r"(?<!\d)(?:\+91[\s-]?)?(?:0[\s-]?)?[6-9](?:\d[\s-]?){8}\d(?!\d)"
         ),
     ),
-    # Generic email addresses
+    # Generic email addresses. The trailing `(?![a-zA-Z0-9])` stops the TLD from
+    # ending mid-word (so it won't grab "com" out of "x.commercial"). Requires an
+    # `@`, so plain drug names / words are never matched.
     (
         "email",
-        re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
+        re.compile(
+            r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}(?![a-zA-Z0-9])"
+        ),
     ),
 ]
 

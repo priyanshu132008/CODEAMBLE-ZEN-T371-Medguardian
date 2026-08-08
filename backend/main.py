@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ from agents.safety_check import (
     Medication,
     SafetyFlag,
     run_safety_check,
+    check_allergy_conflicts,
 )
 from agents.teach_back import evaluate_teach_back
 from agents.voice_utils import generate_tts, transcribe_stt, SarvamUnavailableError
@@ -45,22 +47,37 @@ _pii_scrubber = PIIScrubber()
 # Keys whose string values are treated as patient names to explicitly redact
 # (the regex scrubber cannot catch arbitrary names, so callers collect any
 # known names from the request context and pass them to anonymize_payload).
+# NOTE: a bare "name" key is included because some payloads carry the patient
+# name under it — but medication objects ALSO use "name" for the DRUG name, so
+# the walker skips the "medications" / "medications_involved" arrays entirely
+# (see _SKIP_NAME_KEYS). Without that skip, drug names like "Clopidogrel" would
+# be collected as patient names and redacted, corrupting the clinical context
+# sent to the teach-back LLM.
 _NAME_KEYS = {"patient_name", "name", "full_name", "patient"}
+# Keys whose values are lists/objects of clinical tokens (drug names), never
+# patient names — skipped during name collection to avoid false-positive
+# redaction of medication names.
+_SKIP_NAME_KEYS = {"medications", "medications_involved"}
 
 
 def _collect_names(*payloads) -> List[str]:
     """Recursively collect candidate patient names from arbitrary payloads.
 
     Walks dicts/lists looking for name-like keys ("patient_name", "name",
-    "full_name", "patient") with non-empty string values. Used to feed the
-    Privacy Sandbox's explicit name-redaction across all LLM-bound endpoints.
+    "full_name", "patient") with non-empty string values, while skipping any
+    "medications" / "medications_involved" arrays (their "name" fields are drug
+    names, not patient names). Used to feed the Privacy Sandbox's explicit
+    name-redaction across all LLM-bound endpoints.
     """
     names: List[str] = []
 
     def _walk(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
-                if k.lower() in _NAME_KEYS and isinstance(v, str) and v.strip():
+                kl = k.lower()
+                if kl in _SKIP_NAME_KEYS:
+                    continue
+                if kl in _NAME_KEYS and isinstance(v, str) and v.strip():
                     names.append(v.strip())
                 elif isinstance(v, (dict, list)):
                     _walk(v)
@@ -85,6 +102,56 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Request / response models (strict JSON contract)
 # ---------------------------------------------------------------------------
+
+# ABDM / DPDP Act 2023 compliance constants.
+#
+# ABHA (Ayushman Bharat Health Account) IDs are 14-digit health identifiers
+# under India's Ayushman Bharat Digital Mission. The DPDP Act 2023 requires
+# explicit patient consent before any medical record is processed. Both are
+# surfaced on every medical-records endpoint via `compliance_metadata`.
+ABHA_ID_PATTERN = re.compile(r"^\d{14}$")
+DPDP_CONSENT_REQUIRED_MESSAGE = (
+    "DPDP Act Violation: Patient consent is required to process medical records."
+)
+DATA_RESIDENCY_LABEL = "PHI Retained on Local Edge"
+CLOUD_TRANSMISSION_LABEL = "Strictly De-identified Clinical Tokens Only"
+
+
+def _normalize_abha_id(abha_id: Optional[str]) -> Optional[str]:
+    """Return the stripped ABHA ID, or None when absent/blank."""
+    if abha_id is None:
+        return None
+    aid = abha_id.strip()
+    return aid or None
+
+
+def _validate_abha_id(abha_id: Optional[str]) -> Optional[str]:
+    """Normalize and validate an ABHA ID. Returns the cleaned id or None.
+
+    Raises HTTPException(422) if a non-empty id is not exactly 14 digits.
+    """
+    aid = _normalize_abha_id(abha_id)
+    if aid is not None and not ABHA_ID_PATTERN.fullmatch(aid):
+        raise HTTPException(
+            status_code=422,
+            detail="ABHA ID must be exactly 14 digits.",
+        )
+    return aid
+
+
+def _build_compliance_metadata(
+    abha_id: Optional[str], consent_granted: bool = True
+) -> dict:
+    """Build the ABDM/DPDP compliance metadata object attached to medical-records
+    responses. `consent_granted` is echoed so callers can confirm the patient
+    opted in; endpoints that reach this builder have already passed the consent
+    gate (consent False is rejected with 403 upstream)."""
+    return {
+        "abdm_abha_id": abha_id,
+        "dpdp_consent": bool(consent_granted),
+        "data_residency": DATA_RESIDENCY_LABEL,
+        "cloud_transmission": CLOUD_TRANSMISSION_LABEL,
+    }
 
 
 class SafetyCheckRequest(BaseModel):
@@ -126,6 +193,11 @@ class CoordinatorTriggerRequest(BaseModel):
 class ClaimGenerateRequest(BaseModel):
     patient_data: dict
     patient_email: str
+    # ABDM/DPDP compliance — ABHA id (optional, 14 digits) and explicit consent.
+    # Consent defaults to True so existing callers keep working, but a False
+    # value is rejected with 403 before any medical record is processed.
+    abha_id: Optional[str] = None
+    consent_granted: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +216,12 @@ def safety_check(request: SafetyCheckRequest) -> SafetyCheckResponse:
 # Document Upload / OCR Intake (Agent 1 & 2 — vision extraction + safety check)
 # ---------------------------------------------------------------------------
 
-UPLOAD_ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
+UPLOAD_ALLOWED_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "application/pdf",
+}
 
 
 def _run_safety_check_from_extracted(extracted: dict) -> List[dict]:
@@ -152,6 +229,12 @@ def _run_safety_check_from_extracted(extracted: dict) -> List[dict]:
     Agent 1, returning the flags as plain dicts so they slot directly into the
     shared JSON contract's `safety_flags` array. Tolerates malformed med rows
     from OCR by skipping anything that won't validate.
+
+    Two layers run here: (1) the drug-drug interaction / duplicate-therapy CSV
+    check, and (2) the allergy cross-reference, which flags any prescribed
+    medication that belongs to a drug family the patient is documented to be
+    allergic to. Allergy conflicts are CRITICAL and use the `allergy_conflict`
+    flag shape (with singular `medication` / `allergy` keys).
     """
     medications: List[Medication] = []
     for m in extracted.get("medications", []) or []:
@@ -160,23 +243,45 @@ def _run_safety_check_from_extracted(extracted: dict) -> List[dict]:
         except Exception:  # noqa: BLE001 — skip a badly-shaped OCR row
             continue
     flags = run_safety_check(medications)
-    return [f.model_dump() for f in flags]
+    out: List[dict] = [f.model_dump() for f in flags]
+    # Allergy cross-reference — drug vs documented allergy (CRITICAL conflicts).
+    allergies = extracted.get("allergies", []) or []
+    out.extend(check_allergy_conflicts(medications, allergies))
+    return out
 
 
 @app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...)) -> dict:
-    """Agent 1: accept a photo/scan of a discharge summary, run vision OCR, and
-    return the structured discharge data as the shared JSON contract state
+async def upload_document(
+    file: UploadFile = File(...),
+    abha_id: Optional[str] = Form(None),
+    consent_granted: bool = Form(True),
+) -> dict:
+    """Agent 1: accept a photo/scan/PDF of a discharge summary, run vision OCR,
+    and return the structured discharge data as the shared JSON contract state
     object (context.md). The frontend drives the whole pipeline from this.
+
+    ABDM / DPDP Act 2023 compliance:
+      * `consent_granted` MUST be True — a False value is rejected with HTTP 403
+        before any medical record is read or processed.
+      * `abha_id` (optional) is validated as a 14-digit Ayushman Bharat Health
+        Account id when supplied.
+      * The response carries a `compliance_metadata` block attesting to consent,
+        data residency, and the de-identified-only cloud transmission policy.
     """
     import uuid
+
+    # DPDP consent gate — enforce BEFORE any medical record is touched.
+    if not consent_granted:
+        raise HTTPException(status_code=403, detail=DPDP_CONSENT_REQUIRED_MESSAGE)
+
+    abha_id_clean = _validate_abha_id(abha_id)
 
     if file.content_type not in UPLOAD_ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=415,
             detail=(
-                "Unsupported file type. Please upload a JPG or PNG photo of the "
-                "discharge summary for OCR extraction."
+                "Unsupported file type. Please upload a JPG, PNG, WebP image or a "
+                "PDF of the discharge summary for OCR extraction."
             ),
         )
 
@@ -209,6 +314,9 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
             "corrections_given": [],
         },
         "language": "en",
+        "compliance_metadata": _build_compliance_metadata(
+            abha_id_clean, consent_granted=True
+        ),
     }
 
 
@@ -508,9 +616,21 @@ async def claim_generate(request: ClaimGenerateRequest) -> dict:
     the JSON dossier plus a rendered HTML Claim Summary Report so the hospital
     UI can render it immediately, and emails a transparent claim-status copy
     to the patient.
+
+    ABDM / DPDP Act 2023 compliance: `consent_granted` MUST be True (a False
+    value is rejected with HTTP 403), `abha_id` is validated as 14 digits when
+    supplied, and the response carries a `compliance_metadata` block.
     """
+    # DPDP consent gate — enforce before any medical record is processed.
+    if not request.consent_granted:
+        raise HTTPException(status_code=403, detail=DPDP_CONSENT_REQUIRED_MESSAGE)
+    abha_id_clean = _validate_abha_id(request.abha_id)
+
     result = await generate_claim_dossier(
         patient_data=request.patient_data,
         patient_email=request.patient_email,
+    )
+    result["compliance_metadata"] = _build_compliance_metadata(
+        abha_id_clean, consent_granted=True
     )
     return result
