@@ -12,10 +12,10 @@ export default function PresentationSlides() {
       
       <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center border-b border-white/10 pb-4 mb-6 gap-4">
         <div>
-          <span className="text-xs font-black uppercase tracking-widest text-blue-400 bg-blue-500/10 px-3 py-1 rounded-full border border-blue-500/20">
+          <span className="text-xs font-bold uppercase tracking-widest text-blue-400 bg-blue-500/10 px-3 py-1 rounded-full border border-blue-500/20">
             Pitch Deck Overview
           </span>
-          <h2 className="text-2xl font-black tracking-tight mt-2 bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+          <h2 className="text-2xl font-bold tracking-tight mt-2 bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
             Team ByteForge Core Blueprint
           </h2>
         </div>

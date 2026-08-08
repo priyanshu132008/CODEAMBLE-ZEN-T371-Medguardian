@@ -78,7 +78,7 @@ export default function SimulatedPhone({ demoMode }: { demoMode: boolean }) {
           <div className="bg-slate-950 text-white px-4 py-3 border-b border-white/5 flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
             <div>
-              <h4 className="text-xs font-black tracking-tight">MedGuardian Automation</h4>
+              <h4 className="text-xs font-bold tracking-tight">MedGuardian Automation</h4>
               <p className="text-[9px] font-mono text-slate-400">Patient Continuous Monitoring</p>
             </div>
           </div>

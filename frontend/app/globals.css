@@ -10,6 +10,10 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  /* JetBrains Mono: terminal/medical-data font (API routes, extracted JSON,
+     ICD-10 codes). Opt-in via `font-jetbrains` — Geist Mono stays the default
+     `--font-mono` for general UI. */
+  --font-jetbrains: var(--font-jetbrains-mono);
 }
 
 @media (prefers-color-scheme: dark) {

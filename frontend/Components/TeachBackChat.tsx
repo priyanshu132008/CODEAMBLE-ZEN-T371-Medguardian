@@ -139,7 +139,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
 
       setIsRecording(false);
       setVoiceBusy(true);
-      reportVoice(false, 'Transcribing audio via Agent 3 STT...');
+      reportVoice(false, 'Transcribing your audio…');
 
       const stopped = new Promise<void>((resolve) => {
         recorder.onstop = () => resolve();
@@ -159,7 +159,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
 
       try {
         // Re-encode webm/opus -> WAV so Sarvam STT reliably accepts it.
-        reportVoice(false, 'Encoding audio for Agent 3 STT...');
+        reportVoice(false, 'Preparing your audio…');
         const wavBlob = await audioBlobToWav(blob);
         const text = await speechToText(wavBlob);
         const transcript = (text || '').trim();
@@ -309,13 +309,13 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
       <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col h-[520px] backdrop-blur-md relative w-full">
         <div className="bg-slate-950 px-5 py-4 border-b border-white/5 flex items-center justify-between">
           <div>
-            <h3 className="font-black text-white text-base tracking-tight">Interactive Patient Teach-Back Loop</h3>
-            <p className="text-[11px] font-mono text-slate-400">AGENT 3 VERIFIER CORE • TARGET POST ROUTE: /api/teach-back</p>
+            <h3 className="font-bold text-white text-base tracking-tight">My Care Guide</h3>
+            <p className="text-[11px] font-mono text-slate-400">Voice check · confirms you understand your medicines</p>
           </div>
           {chat.score != null && (
             <div className="bg-purple-500/10 border border-purple-500/30 px-3 py-1.5 rounded-xl text-center">
-              <span className="text-[9px] font-black tracking-widest text-purple-400 block uppercase">Metrics Score</span>
-              <span className="text-lg font-black text-white">{chat.score}%</span>
+              <span className="text-[9px] font-bold tracking-widest text-purple-400 block uppercase">Metrics Score</span>
+              <span className="text-lg font-bold text-white">{chat.score}%</span>
             </div>
           )}
         </div>
@@ -327,11 +327,11 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           <div className="px-5 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 flex items-center gap-2.5">
             <span className="text-base leading-none">✅</span>
             <div className="flex flex-col">
-              <span className="text-[11px] font-black text-emerald-300 tracking-tight leading-tight">
+              <span className="text-[11px] font-bold text-emerald-300 tracking-tight leading-tight">
                 Care Coordination Dispatched to Doctor &amp; Patient
               </span>
               <span className="text-[9px] font-mono text-emerald-500/70 tracking-tight">
-                AGENT 4 AUTO-TRIGGER · /api/coordinator/trigger · comprehension ≥ 70%
+                Care team notified · comprehension ≥ 70%
               </span>
             </div>
           </div>
@@ -341,7 +341,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           {chat.questions.map((q, idx) => (
             <div key={idx} className="space-y-3">
               <div className="flex gap-3 max-w-[85%]">
-                <div className="w-8 h-8 rounded-xl bg-purple-600 font-black text-white flex items-center justify-center shadow-md shrink-0">AI</div>
+                <div className="w-8 h-8 rounded-xl bg-purple-600 font-bold text-white flex items-center justify-center shadow-md shrink-0">AI</div>
                 <div className="bg-slate-800 border border-white/5 text-slate-100 p-3.5 rounded-2xl rounded-tl-none shadow-md space-y-2 leading-relaxed text-sm">
                   <p>{q}</p>
                 </div>
@@ -359,7 +359,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
               {chat.corrections[idx] && (
                 <div className="flex gap-3 max-w-[85%] pl-11">
                   <div className="bg-amber-500/10 border border-amber-500/20 text-amber-200 p-3.5 rounded-2xl shadow-xs leading-relaxed text-sm">
-                    <span className="text-[10px] font-black uppercase text-amber-400 tracking-wider block mb-1">💡 Clinical Guidance Review</span>
+                    <span className="text-[10px] font-bold uppercase text-amber-400 tracking-wider block mb-1">💡 Clinical Guidance Review</span>
                     <p>{chat.corrections[idx]}</p>
                   </div>
                 </div>
@@ -370,7 +370,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           {loading && (
             <div className="flex items-center gap-2 text-purple-400 font-mono text-[10px] pl-11 animate-pulse">
               <span className="h-1.5 w-1.5 rounded-full bg-purple-400 animate-ping" />
-              <span>Agent 3 computing semantic intent vectors...</span>
+              <span>Checking your understanding…</span>
             </div>
           )}
         </div>
@@ -399,7 +399,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
             onClick={toggleVoice}
             disabled={loading || voiceBusy}
             title={isRecording ? 'Stop recording' : 'Open voice link'}
-            className={`px-4 rounded-xl font-black text-xs uppercase tracking-wider transition-all shadow-md shrink-0 ${
+            className={`px-4 rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-md shrink-0 ${
               isRecording
                 ? 'bg-red-600 animate-pulse text-white shadow-lg shadow-red-600/30'
                 : voiceBusy
@@ -413,7 +413,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           <button
             type="submit"
             disabled={!input.trim() || loading}
-            className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-800 text-white font-black text-xs uppercase tracking-wider px-5 rounded-xl transition-all shadow-md"
+            className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-800 text-white font-bold text-xs uppercase tracking-wider px-5 rounded-xl transition-all shadow-md"
           >
             Verify
           </button>

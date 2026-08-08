@@ -90,7 +90,7 @@ export default function ClaimDossier({
       {/* Agent 5 card */}
       <div className="bg-gradient-to-br from-sky-900 via-slate-900 to-slate-950 border border-sky-500/30 rounded-3xl p-6 text-white shadow-2xl relative overflow-hidden">
         <div className="absolute top-0 right-0 bg-sky-500/10 text-sky-300 text-[10px] font-mono font-bold uppercase tracking-wider px-3 py-1 rounded-bl-xl border-l border-b border-sky-500/20">
-          Agent 5 Admin Subroute • /api/claim/generate
+          Insurance &amp; Claims
         </div>
 
         {/* ABDM / DPDP compliance badge — surfaced once a dossier is generated,
@@ -113,18 +113,18 @@ export default function ClaimDossier({
               <Building2 className="h-6 w-6 text-sky-300" />
             </div>
             <div>
-              <h3 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
-                Hospital Admin Auto-Claim
+              <h3 className="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                Auto-Claim Engine
               </h3>
-              <p className="text-xs text-slate-300 font-medium mt-1 font-mono">
-                TPA Insurance Justification Dossier • ICD-10 + Medical Necessity + Billing
+              <p className="text-xs text-slate-300 font-medium mt-1">
+                We file your TPA insurance dossier automatically — ICD-10 codes, medical necessity, and billing.
               </p>
             </div>
           </div>
 
           {/* Patient email for the transparent claim-status copy */}
           <div className="w-full sm:w-auto">
-            <label className="text-[10px] font-black uppercase tracking-widest text-sky-300 block mb-1">
+            <label className="text-[10px] font-semibold uppercase tracking-widest text-sky-300 block mb-1">
               Patient Email (claim-status copy)
             </label>
             <div className="flex items-center gap-2 bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 w-full sm:w-72">
@@ -145,7 +145,7 @@ export default function ClaimDossier({
           <button
             onClick={handleGenerate}
             disabled={!ready || loading}
-            className={`flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl font-black text-sm uppercase tracking-wider transition-all duration-300 shadow-md ${
+            className={`flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl font-semibold text-sm uppercase tracking-wider transition-all duration-300 shadow-md ${
               !ready
                 ? 'bg-slate-700/60 text-slate-400 cursor-not-allowed'
                 : loading
@@ -229,7 +229,7 @@ export default function ClaimDossier({
                   <FileText className="h-5 w-5 text-white" />
                 </div>
                 <div>
-                  <h3 className="font-black text-slate-900 text-base tracking-tight">Claim Summary Report</h3>
+                  <h3 className="font-bold text-slate-900 text-base tracking-tight">Claim Summary Report</h3>
                   <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
                     Auto-Claim &amp; Insurance Justification Dossier
                   </p>

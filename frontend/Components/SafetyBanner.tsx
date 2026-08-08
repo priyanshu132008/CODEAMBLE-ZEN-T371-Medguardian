@@ -56,10 +56,10 @@ export default function SafetyBanner({ medications, demoMode }: SafetyBannerProp
       <div className="bg-slate-950/80 px-4 py-2 border-b border-white/5 flex justify-between items-center text-[10px] font-mono tracking-tight text-slate-400">
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${loading ? 'bg-amber-400 animate-ping' : 'bg-red-500 shadow-xs'}`} />
-          <span>LIVE TRACKING LAYER: CONTRAINDICATION ENGINE</span>
+          <span>SAFETY CHECK</span>
         </div>
         <span className="text-red-400 font-bold uppercase bg-red-500/10 px-2 py-0.5 rounded border border-red-500/20">
-          Agent 2 Active
+          Checking
         </span>
       </div>
 
@@ -68,11 +68,11 @@ export default function SafetyBanner({ medications, demoMode }: SafetyBannerProp
           🚨
         </div>
         <div>
-          <h3 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
+          <h3 className="text-lg font-bold tracking-tight text-white flex items-center gap-2">
             Critical Drug Conflict Triggered
           </h3>
           {loading ? (
-            <p className="text-sm text-slate-400 font-mono mt-1 animate-pulse">Agent cross-checking pharmacological taxonomy structures...</p>
+            <p className="text-sm text-slate-400 font-mono mt-1 animate-pulse">Checking your medicines against your allergies…</p>
           ) : (
             <div className="mt-2 space-y-2">
               {flags.map((f, i) => (
