@@ -10,6 +10,9 @@ Pattern coverage (Phase 1):
   - Standard Indian phone numbers (with/without +91 / 0 prefix).
   - Generic email addresses.
   - Project-specific identifiers such as "Patient ID: ZEN-T371".
+  - Explicit patient names supplied via the `names` parameter (regex cannot
+    catch arbitrary names, so callers pass the known patient name(s) and the
+    scrubber redacts them whole-word, case-insensitively).
 
 The original tokens are kept in an in-memory mapping so that downstream
 results can, in principle, be re-identified via `restore_payload` (placeholder
@@ -19,7 +22,7 @@ for now — restoration across the LLM round-trip is a Phase 2 concern).
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Redaction marker (single, shared token so it is easy to grep in logs)
@@ -75,12 +78,31 @@ class PIIScrubber:
         self._counter: int = 0
 
     # ------------------------------------------------------------------
+    # Internal: store an original and emit the redaction marker
+    # ------------------------------------------------------------------
+
+    def _redact(self, original: str, label: str) -> str:
+        """Record *original* in the in-memory map (once per unique value) and
+        return the shared redaction marker."""
+        if original not in self._redaction_map.values():
+            self._counter += 1
+            self._redaction_map[f"{label}_{self._counter}"] = original
+        return REDACTED_MARKER
+
+    # ------------------------------------------------------------------
     # Anonymization
     # ------------------------------------------------------------------
 
-    def anonymize_payload(self, text: str) -> str:
+    def anonymize_payload(self, text: str, names: Optional[List[str]] = None) -> str:
         """Return a copy of *text* with all matched PII replaced by the
         shared redaction marker.
+
+        Args:
+            text: The free text to scrub.
+            names: Optional list of explicit patient names to redact. Regex
+                cannot catch arbitrary names, so callers that know the
+                patient's name pass it here; it is redacted whole-word and
+                case-insensitively, ahead of the regex patterns.
 
         Each unique original token is stored in the in-memory map keyed by an
         opaque id, preserving the option to restore the payload later.
@@ -88,20 +110,26 @@ class PIIScrubber:
         if not text:
             return text
 
-        def _store_and_replace(match: re.Match, label: str) -> str:
-            original = match.group(0)
-            # Re-use the same token id for identical originals so the mapping
-            # stays compact and reversible.
-            if original not in self._redaction_map.values():
-                self._counter += 1
-                token_id = f"{label}_{self._counter}"
-                self._redaction_map[token_id] = original
-            return REDACTED_MARKER
-
         scrubbed = text
+
+        # 1. Explicit names first — redact whole-word, case-insensitively.
+        if names:
+            for name in names:
+                n = (name or "").strip()
+                # Skip trivially short tokens to avoid nuking common words.
+                if len(n) < 2:
+                    continue
+                scrubbed = re.sub(
+                    r"\b" + re.escape(n) + r"\b",
+                    lambda m: self._redact(m.group(0), "name"),
+                    scrubbed,
+                    flags=re.IGNORECASE,
+                )
+
+        # 2. Regex patterns (patient id, phone, email), most-specific first.
         for label, pattern in _PII_PATTERNS:
             scrubbed = pattern.sub(
-                lambda m, _label=label: _store_and_replace(m, _label),
+                lambda m, _label=label: self._redact(m.group(0), _label),
                 scrubbed,
             )
         return scrubbed

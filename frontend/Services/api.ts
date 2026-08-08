@@ -23,14 +23,20 @@ export const checkSafety = async (medications: any[]) => {
 
 // 2. Teach-Back Verification
 export const evaluateTeachBack = async (
-  extracted: any, 
-  currentTeachBack: any, 
+  extracted: any,
+  currentTeachBack: any,
   patientResponse: string
 ) => {
   const response = await axios.post(`${API_BASE}/teach-back`, {
     extracted,
     current_teach_back: currentTeachBack,
-    patient_response: patientResponse
+    patient_response: patientResponse,
+    // Hardcoded verified delivery address for the Agent 4 auto-trigger. In
+    // Resend sandbox mode the sandbox sender (resend.dev) may only deliver to
+    // the account owner's verified address, so both the patient + doctor
+    // handoff copies route to the same verified inbox for the live demo.
+    patient_email: 'priyanshucreator3@gmail.com',
+    doctor_email: 'priyanshucreator3@gmail.com',
   });
   return response.data; // Returns updated teach_back object
 };
@@ -57,5 +63,33 @@ export const getMockReminders = async () => {
 
 export const simulateEscalation = async (symptom: string) => {
   const response = await axios.post(`${API_BASE}/escalate/simulate`, { symptom });
+  return response.data;
+};
+
+// 5. Agent 4 — Care Coordinator (manual override; also auto-fires from teach-back)
+export const triggerCoordinator = async (
+  patientData: any,
+  patientEmail: string,
+  doctorEmail: string,
+  language: string = 'English'
+) => {
+  const response = await axios.post(`${API_BASE}/coordinator/trigger`, {
+    patient_data: patientData,
+    patient_email: patientEmail,
+    doctor_email: doctorEmail,
+    language,
+  });
+  return response.data;
+};
+
+// 6. Agent 5 — Auto-Claim & Insurance Justification Engine
+export const generateClaimDossier = async (patientData: any, patientEmail: string) => {
+  // Returns { dossier, html_report, patient_notification }.
+  // The backend always returns a dossier (with a review-flagged fallback if the
+  // coding LLM is unavailable), so the UI can always render an html_report.
+  const response = await axios.post(`${API_BASE}/claim/generate`, {
+    patient_data: patientData,
+    patient_email: patientEmail,
+  });
   return response.data;
 };
