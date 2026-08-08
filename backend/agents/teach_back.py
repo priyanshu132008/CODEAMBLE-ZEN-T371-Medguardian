@@ -23,6 +23,11 @@ from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 import openai
+from agents.compliance_guard import (
+    collect_explicit_names,
+    payload_as_json,
+    prepare_clinical_payload,
+)
 
 # ---------------------------------------------------------------------------
 # OpenRouter client (OpenAI-compatible). Key read from the environment.
@@ -94,12 +99,20 @@ async def evaluate_teach_back(
     Returns:
         A dictionary matching the `teach_back` contract in context.md.
     """
+    names = collect_explicit_names(extracted_data)
+    names.extend(collect_explicit_names(current_teach_back_state))
+    guarded_extracted = prepare_clinical_payload(extracted_data, names=names)
+    guarded_state = prepare_clinical_payload(current_teach_back_state, names=names)
+    guarded_response = prepare_clinical_payload(
+        {"patient_response": new_patient_response},
+        names=names,
+    ).get("patient_response", new_patient_response)
     user_prompt = (
         "TRUE EXTRACTED MEDICAL DATA (ground truth):\n"
-        f"{json.dumps(extracted_data, ensure_ascii=False, indent=2)}\n\n"
+        f"{payload_as_json(guarded_extracted)}\n\n"
         "CURRENT TEACH-BACK STATE (history so far):\n"
-        f"{json.dumps(current_teach_back_state, ensure_ascii=False, indent=2)}\n\n"
-        f"NEW PATIENT RESPONSE:\n{new_patient_response}\n\n"
+        f"{payload_as_json(guarded_state)}\n\n"
+        f"NEW PATIENT RESPONSE:\n{guarded_response}\n\n"
         "Evaluate the patient's understanding against the ground truth. Append "
         "this exchange to the existing history (do not discard previous "
         "questions/responses/corrections), assign an understanding_score from "

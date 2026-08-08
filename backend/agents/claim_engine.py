@@ -48,6 +48,7 @@ if _resend_key:
     resend.api_key = _resend_key
 
 from agents.privacy_sandbox import PIIScrubber
+from agents.compliance_guard import collect_explicit_names, prepare_clinical_payload
 
 # ---------------------------------------------------------------------------
 # OpenRouter client (separate, dedicated instance for this engine)
@@ -243,7 +244,8 @@ def _extract_clinical_context(patient_data: dict) -> dict:
     extracted = patient_data.get("extracted") or {}
     safety_flags = patient_data.get("safety_flags") or []
 
-    context = {
+    context = prepare_clinical_payload(
+        {
         "diagnosis": extracted.get("diagnosis"),
         "medications": extracted.get("medications", []),
         "precautions": extracted.get("precautions", []),
@@ -254,14 +256,12 @@ def _extract_clinical_context(patient_data: dict) -> dict:
         "teach_back_comprehension_score": (
             (patient_data.get("teach_back") or {}).get("understanding_score")
         ),
-    }
+        },
+        names=collect_explicit_names(patient_data),
+        scrubber=_scrubber,
+    )
     serialized = json.dumps(context, ensure_ascii=False, indent=2)
-    # Pass the patient's name to anonymize_payload (regex can't catch arbitrary
-    # names) so it is redacted whole-word alongside phones/emails/IDs — one
-    # canonical redaction path, consistent with the rest of the API.
-    name = patient_data.get("patient_name") or patient_data.get("name")
-    names = [name] if name else None
-    return {"_scrubbed_context": _scrubber.anonymize_payload(serialized, names=names)}
+    return {"_scrubbed_context": serialized}
 
 
 def _build_user_prompt(patient_data: dict) -> str:

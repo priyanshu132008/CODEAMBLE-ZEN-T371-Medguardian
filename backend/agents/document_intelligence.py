@@ -32,6 +32,11 @@ load_dotenv()
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+from agents.compliance_guard import (
+    assert_raw_document_endpoint_is_local,
+    configured_local_ai_endpoints,
+)
+
 
 # ---------------------------------------------------------------------------
 # Ollama client
@@ -220,6 +225,10 @@ async def _call_model(model: str, user_content: list, timeout: float = 25.0) -> 
     model. Never raises on a bad response shape — those become None rather than a
     TypeError that aborts the chain.
     """
+    assert_raw_document_endpoint_is_local(
+        str(client.base_url),
+        configured_local_ai_endpoints(os.getenv("MEDGUARDIAN_LOCAL_AI_ENDPOINTS")),
+    )
     completion = await client.chat.completions.create(
         model=model,
         messages=[

@@ -50,6 +50,28 @@ _PII_PATTERNS: List[Tuple[str, re.Pattern]] = [
             r"(?i)\b(?:(?:patient\s*id|case\s*id|mrn|id)\s*[:#]?\s*)?ZEN[-\s]?T\d{3,}\b"
         ),
     ),
+    # ABHA / ABDM health account identifiers are 14 digits.  Require a
+    # standalone digit run so this does not redact a slice of a longer value.
+    (
+        "abha_id",
+        re.compile(r"(?i)(?<!\d)(?:abha|abdm)\s*(?:id|number|no)?\s*[:#-]?\s*\d{14}(?!\d)|(?<!\d)\d{14}(?!\d)"),
+    ),
+    # UUID-style identifiers commonly used for patient rows and database IDs.
+    (
+        "uuid",
+        re.compile(
+            r"(?i)(?<![0-9a-f])"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}"
+            r"(?![0-9a-f])"
+        ),
+    ),
+    # MRNs are redacted only when explicitly labelled, avoiding arbitrary
+    # clinical numbers and dosages.
+    (
+        "mrn",
+        re.compile(r"(?i)\b(?:mrn|medical\s+record\s+number)\s*[:#-]?\s*[A-Z0-9][A-Z0-9\-/]{2,}\b"),
+    ),
     # Standard Indian mobile numbers: an optional +91 or 0 prefix, then a 10-digit
     # subscriber number starting 6-9, with optional single spaces/dashes between
     # digit groups (e.g. "+91 98765 43210", "098765-43210", "9876543210").
