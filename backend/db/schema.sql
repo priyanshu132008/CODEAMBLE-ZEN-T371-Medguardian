@@ -77,6 +77,86 @@ CREATE TABLE IF NOT EXISTS compliance_audit (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- -----------------------------------------------------------------------------
+-- calendar_connections (Google Calendar connection metadata)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS calendar_connections (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id              UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL DEFAULT 'google',
+    google_account_email TEXT,
+    calendar_id          TEXT NOT NULL DEFAULT 'primary',
+    scopes               JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT calendar_connections_user_provider_unique UNIQUE (user_id, provider)
+);
+
+-- Secret material is isolated from metadata. This table intentionally has RLS
+-- enabled but no client-facing policies; only the backend service-role client
+-- can access it. The service role key never leaves the backend.
+CREATE TABLE IF NOT EXISTS calendar_connection_secrets (
+    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connection_id          UUID NOT NULL REFERENCES calendar_connections(id) ON DELETE CASCADE,
+    encrypted_refresh_token TEXT NOT NULL,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT calendar_connection_secrets_connection_unique UNIQUE (connection_id)
+);
+
+-- Migrate rows from the pre-3B-3a layout, if that layout was deployed, before
+-- removing the secret column from the metadata table. Dynamic SQL keeps a fresh
+-- installation from referencing a column that does not exist.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'calendar_connections'
+          AND column_name = 'encrypted_refresh_token'
+    ) THEN
+        EXECUTE $migration$
+            INSERT INTO public.calendar_connection_secrets
+                (connection_id, encrypted_refresh_token)
+            SELECT id, encrypted_refresh_token
+            FROM public.calendar_connections
+            WHERE encrypted_refresh_token IS NOT NULL
+            ON CONFLICT (connection_id) DO NOTHING
+        $migration$;
+        ALTER TABLE calendar_connections DROP COLUMN encrypted_refresh_token;
+    END IF;
+END
+$$;
+
+ALTER TABLE calendar_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE calendar_connection_secrets ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS calendar_connections_select_own ON calendar_connections;
+CREATE POLICY calendar_connections_select_own
+    ON calendar_connections FOR SELECT TO authenticated
+    USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS calendar_connections_insert_own ON calendar_connections;
+CREATE POLICY calendar_connections_insert_own
+    ON calendar_connections FOR INSERT TO authenticated
+    WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS calendar_connections_update_own ON calendar_connections;
+CREATE POLICY calendar_connections_update_own
+    ON calendar_connections FOR UPDATE TO authenticated
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS calendar_connections_delete_own ON calendar_connections;
+CREATE POLICY calendar_connections_delete_own
+    ON calendar_connections FOR DELETE TO authenticated
+    USING (auth.uid() = user_id);
+
+-- No SELECT/INSERT/UPDATE/DELETE policies are intentionally defined for
+-- calendar_connection_secrets. Normal authenticated and anonymous clients are
+-- denied by RLS; the backend service-role client bypasses RLS for secret work.
+
 -- =============================================================================
 -- Reference: the compliance_metadata object returned by the API
 -- =============================================================================

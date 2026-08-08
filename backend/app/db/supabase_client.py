@@ -45,3 +45,27 @@ def get_authenticated_supabase_client(access_token: str) -> Client:
     client = _create_configured_client()
     client.postgrest.auth(access_token)
     return client
+
+
+def _create_service_client() -> Client:
+    """Create the backend-only client used for secret-table operations."""
+
+    if not settings.supabase_url or not settings.supabase_secret_key:
+        raise RuntimeError(
+            "Backend Supabase secret access is not configured. Set SUPABASE_URL "
+            "and SUPABASE_SECRET_KEY."
+        )
+
+    return create_client(settings.supabase_url, settings.supabase_secret_key)
+
+
+@lru_cache(maxsize=1)
+def get_supabase_service_client() -> Client:
+    """Return the privileged backend-only Supabase client.
+
+    This client must remain confined to server-side secret persistence code.
+    It is deliberately separate from the publishable/anon client used by
+    normal authenticated requests.
+    """
+
+    return _create_service_client()

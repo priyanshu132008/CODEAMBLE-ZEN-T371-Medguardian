@@ -27,6 +27,12 @@ class Settings:
         or os.getenv("SUPABASE_ANON_KEY")
         or ""
     ).strip()
+    medguardian_token_encryption_key: str = os.getenv(
+        "MEDGUARDIAN_TOKEN_ENCRYPTION_KEY", ""
+    ).strip()
+    # Backend-only Supabase secret/service-role key. Never expose this value to
+    # browser clients or include it in API responses.
+    supabase_secret_key: str = os.getenv("SUPABASE_SECRET_KEY", "").strip()
 
 
 settings = Settings()
