@@ -5,8 +5,9 @@ Orchestrates Agent 1, Agent 2 (Safety Check), and Agent 3 (Teach-Back via Text/V
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import List
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -27,6 +28,7 @@ from agents.teach_back import evaluate_teach_back
 from agents.voice_utils import generate_tts, transcribe_stt, SarvamUnavailableError
 from agents.document_intelligence import extract_discharge
 from agents.privacy_sandbox import PIIScrubber
+from agents.coordinator_engine import dispatch_care_coordination
 
 app = FastAPI(title="MedGuardian API", version="0.1.0")
 
@@ -67,10 +69,23 @@ class TeachBackRequest(BaseModel):
     extracted: dict
     current_teach_back: dict
     patient_response: str
+    # Optional session context for the Agent 4 auto-trigger. When omitted,
+    # fallback demo emails are used so the coordinator still fires for demos.
+    safety_flags: List[dict] = []
+    patient_email: Optional[str] = None
+    doctor_email: Optional[str] = None
+    language: str = "English"
 
 
 class EscalateSimulateRequest(BaseModel):
     symptom: str
+
+
+class CoordinatorTriggerRequest(BaseModel):
+    patient_data: dict
+    patient_email: str
+    doctor_email: str
+    language: str = "English"
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +154,66 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
 # Teach-Back Text Endpoint (Agent 3 — LLM evaluation via OpenRouter)
 # ---------------------------------------------------------------------------
 
+# Agent 4 auto-trigger thresholds. A teach-back session is "complete"
+# (handoff-worthy) when the patient demonstrates adequate comprehension OR
+# the Q&A has reached a minimum depth (so the coordinator still fires for
+# low-literacy patients who struggle to reach the passing threshold).
+COMPREHENSION_PASS_THRESHOLD = 70
+TEACH_BACK_MIN_QUESTIONS_FOR_HANDOFF = 3
+
+# Demo fallback recipients used when the session does not supply real emails.
+DEMO_PATIENT_EMAIL = os.getenv("DEMO_PATIENT_EMAIL", "patient.demo@medguardian.app")
+DEMO_DOCTOR_EMAIL = os.getenv("DEMO_DOCTOR_EMAIL", "doctor.demo@medguardian.app")
+
+
+def _teach_back_is_complete(updated_state: dict) -> Tuple[bool, str]:
+    """Return (is_complete, reason) for the teach-back session."""
+    score = int(updated_state.get("understanding_score", 0) or 0)
+    questions_asked = updated_state.get("questions_asked", []) or []
+    if score >= COMPREHENSION_PASS_THRESHOLD:
+        return True, f"comprehension_score={score} >= {COMPREHENSION_PASS_THRESHOLD}"
+    if len(questions_asked) >= TEACH_BACK_MIN_QUESTIONS_FOR_HANDOFF:
+        return True, (
+            f"questions_asked={len(questions_asked)} >= "
+            f"{TEACH_BACK_MIN_QUESTIONS_FOR_HANDOFF}"
+        )
+    return False, f"score={score}, questions={len(questions_asked)} — not yet complete"
+
+
+async def _run_coordinator_in_background(
+    patient_data: dict, patient_email: str, doctor_email: str, language: str
+) -> None:
+    """Background coroutine: generate + dispatch Agent 4 emails without blocking
+    the teach-back API response. All failures are logged, never raised, so a
+    coordinator outage can never break the teach-back flow.
+    """
+    try:
+        print(
+            f"[Coordinator] Background trigger fired → doctor={doctor_email}, "
+            f"patient={patient_email}, language={language}"
+        )
+        result = await dispatch_care_coordination(
+            patient_data=patient_data,
+            patient_email=patient_email,
+            doctor_email=doctor_email,
+            language=language,
+        )
+        print(
+            f"[Coordinator] Background complete: status={result['status']} | "
+            f"{result['detail']}"
+        )
+    except Exception as exc:  # noqa: BLE001 — must not escape the task
+        print(f"[Coordinator] Background trigger FAILED: {type(exc).__name__}: {exc}")
+
 
 @app.post("/api/teach-back")
 async def teach_back(request: TeachBackRequest) -> dict:
-    """Evaluate a patient's teach-back text response and return the updated state."""
+    """Evaluate a patient's teach-back text response and return the updated state.
+
+    On completion, Agent 4 (Care Coordinator) is triggered in the background via
+    `asyncio.create_task` so the clinical handoff + patient pulse-check emails
+    are generated without blocking this response to the UI.
+    """
     # Privacy Sandbox — scrub PII from the patient's free-text response before
     # it is sent to the external teach-back LLM.
     scrubbed_response = _pii_scrubber.anonymize_payload(request.patient_response)
@@ -152,6 +223,38 @@ async def teach_back(request: TeachBackRequest) -> dict:
         current_teach_back_state=request.current_teach_back,
         new_patient_response=scrubbed_response,
     )
+
+    # Agent 4 auto-trigger — fire only once the teach-back session is complete.
+    is_complete, reason = _teach_back_is_complete(updated_state)
+    if is_complete:
+        teach_back_score = int(updated_state.get("understanding_score", 0) or 0)
+        # Assemble the shared state object (context.md) for the coordinator.
+        patient_data = {
+            "extracted": request.extracted,
+            "safety_flags": request.safety_flags,
+            "teach_back": updated_state,
+            "language": request.language,
+        }
+        patient_email = request.patient_email or DEMO_PATIENT_EMAIL
+        doctor_email = request.doctor_email or DEMO_DOCTOR_EMAIL
+        print(
+            f"[Coordinator] Teach-Back complete ({reason}); scheduling Agent 4 "
+            f"background trigger (score={teach_back_score})."
+        )
+        asyncio.create_task(
+            _run_coordinator_in_background(
+                patient_data=patient_data,
+                patient_email=patient_email,
+                doctor_email=doctor_email,
+                language=request.language,
+            )
+        )
+    else:
+        print(
+            f"[Coordinator] Teach-Back not yet complete ({reason}); "
+            f"Agent 4 not triggered."
+        )
+
     return updated_state
 
 
@@ -285,3 +388,26 @@ def escalate_simulate(request: EscalateSimulateRequest) -> dict:
             "monitor it. Drink water and rest. If it worsens, contact your clinic."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent 4 — Automated Care Coordinator (dual-target email engine)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/coordinator/trigger")
+async def coordinator_trigger(request: CoordinatorTriggerRequest) -> dict:
+    """Agent 4: generate and dispatch the dual-target care coordination emails.
+
+    Produces a technical clinical handoff to the doctor and a localized daily
+    pulse-check to the patient. The doctor-handoff context is scrubbed through
+    the Privacy Sandbox before LLM generation. If Resend is unavailable, both
+    generated bodies are printed to the terminal and surfaced in the response.
+    """
+    result = await dispatch_care_coordination(
+        patient_data=request.patient_data,
+        patient_email=request.patient_email,
+        doctor_email=request.doctor_email,
+        language=request.language,
+    )
+    return result
