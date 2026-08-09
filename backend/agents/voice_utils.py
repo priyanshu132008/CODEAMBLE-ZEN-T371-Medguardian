@@ -50,6 +50,11 @@ async def generate_tts(text: str, language: str) -> str:
 
     Returns:
         A base64-encoded audio string (first item of the `audios` array).
+
+    Raises:
+        SarvamUnavailableError: If the Sarvam TTS endpoint is unreachable, times
+            out, or returns a non-2xx status — mirroring `transcribe_stt` so the
+            route can map it to a clean 503 JSON response instead of a 500.
     """
     target_language_code = LANGUAGE_CODE_MAP.get(language, "en-IN")
 
@@ -61,10 +66,23 @@ async def generate_tts(text: str, language: str) -> str:
         "model": "bulbul:v3",
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(TTS_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    user_message = "Voice playback is temporarily unavailable. The response is shown as text."
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(TTS_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "Sarvam TTS returned non-2xx status %s: %s",
+            exc.response.status_code,
+            exc.response.text[:500],
+        )
+        raise SarvamUnavailableError(user_message) from exc
+    except httpx.RequestError as exc:
+        logger.error("Sarvam TTS request failed: %s: %s", type(exc).__name__, exc)
+        raise SarvamUnavailableError(user_message) from exc
 
     return data["audios"][0]
 

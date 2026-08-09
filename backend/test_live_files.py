@@ -5,7 +5,7 @@ Unlike `test_master_pipeline.py` (which mocks the LLM/OCR/email boundaries for
 determinism), this script exercises the REAL engines end-to-end against a real
 running FastAPI server:
 
-  * Agent 1 — real Ollama vision OCR (mistral-large-3:675b-cloud) on a
+  * Agent 1 — real OpenRouter vision OCR (google/gemini-2.5-flash) on a
     generated PNG image AND a generated text-based PDF.
   * Agent 2 — real rule-based safety check + allergy cross-reference.
   * Agent 3 — real OpenRouter teach-back LLM evaluation.
@@ -335,9 +335,11 @@ def assert_extraction(upload: dict, label: str) -> dict:
     cm = upload.get("compliance_metadata") or {}
     check(cm.get("abdm_abha_id") == ABHA_ID, f"{label}: compliance metadata echoes ABHA id")
     check(cm.get("dpdp_consent") is True, f"{label}: compliance metadata dpdp_consent=True")
-    check(cm.get("data_residency") == "PHI Retained on Local Edge",
+    check(cm.get("data_residency") == "Cloud (OpenRouter)",
           f"{label}: data_residency label correct")
-    check(cm.get("cloud_transmission") == "Strictly De-identified Clinical Tokens Only",
+    check(cm.get("cloud_transmission") == (
+        "Discharge image sent to OpenRouter for vision OCR; clinical data sent "
+        "to OpenRouter for LLM — under DPDP consent"),
           f"{label}: cloud_transmission label correct")
 
     return extracted
@@ -469,9 +471,11 @@ async def run_journey() -> int:
             step(f"claim compliance_metadata: {json.dumps(cm, ensure_ascii=False)}")
             check(cm.get("abdm_abha_id") == ABHA_ID, "claim compliance metadata echoes ABHA id")
             check(cm.get("dpdp_consent") is True, "claim compliance metadata dpdp_consent=True")
-            check(cm.get("data_residency") == "PHI Retained on Local Edge",
+            check(cm.get("data_residency") == "Cloud (OpenRouter)",
                   "claim data_residency label correct")
-            check(cm.get("cloud_transmission") == "Strictly De-identified Clinical Tokens Only",
+            check(cm.get("cloud_transmission") == (
+                "Discharge image sent to OpenRouter for vision OCR; clinical data "
+                "sent to OpenRouter for LLM — under DPDP consent"),
                   "claim cloud_transmission label correct")
 
             # ── Final summary ───────────────────────────────────────────────

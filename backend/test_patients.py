@@ -190,6 +190,73 @@ class PatientEndpointTests(IsolatedAsyncioTestCase):
         self.assertEqual(database_client.table_names, ["patients"])
 
 
+class PatientListEndpointTests(IsolatedAsyncioTestCase):
+    """Admin-authorization for GET /api/patients (the cohort listing).
+
+    The list endpoint requires a validated Supabase token whose email is on the
+    ADMIN_EMAILS allowlist. Unauthenticated → 401, authenticated non-admin →
+    403, admin → the registry. The server resolves admin status; a patient
+    cannot reach it by changing frontend state.
+    """
+
+    async def request(self, headers: dict[str, str] | None = None):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get("/api/patients", headers=headers or {})
+
+    def _auth_client(self, email: str):
+        user = SimpleNamespace(id="u-1", email=email)
+        auth = _FakeAuth(user)
+        return _FakeAuthClient(auth), auth
+
+    async def test_unauthenticated_request_returns_401(self):
+        response = await self.request()
+        self.assertEqual(response.status_code, 401)
+
+    async def test_authenticated_non_admin_returns_403(self):
+        auth_client, _ = self._auth_client("patient@example.com")
+        with (
+            patch("app.api.dependencies.get_supabase_client", return_value=auth_client),
+            patch("app.api.dependencies.settings.is_admin_email", return_value=False),
+        ):
+            response = await self.request({"Authorization": "Bearer valid-token"})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "Admin access required.")
+
+    async def test_admin_returns_registry(self):
+        auth_client, auth = self._auth_client("admin@hospital.in")
+        query = _FakePatientQuery(
+            [
+                {
+                    "id": "u-1",
+                    "patient_code": "MG-001",
+                    "full_name": "Admin View Patient",
+                    "email": "p@example.com",
+                    "phone": None,
+                    "created_at": None,
+                    "diagnosis": "Hypertension",
+                }
+            ]
+        )
+        database_client = _FakeDatabaseClient(query)
+        with (
+            patch("app.api.dependencies.get_supabase_client", return_value=auth_client),
+            patch("app.api.dependencies.settings.is_admin_email", return_value=True),
+            patch("app.api.routers.patients.get_supabase_client", return_value=database_client),
+        ):
+            response = await self.request({"Authorization": "Bearer valid-token"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["source"], "supabase")
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["patients"][0]["name"], "Admin View Patient")
+        self.assertEqual(auth.tokens, ["valid-token"])
+
+
 if __name__ == "__main__":
     import unittest
 

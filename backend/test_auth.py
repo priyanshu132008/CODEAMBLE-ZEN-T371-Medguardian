@@ -94,18 +94,48 @@ class AuthEndpointTests(IsolatedAsyncioTestCase):
         fake_auth = _FakeAuth(user=fake_user)
         fake_client = _FakeSupabaseClient(fake_auth)
 
-        with patch(
-            "app.api.dependencies.get_supabase_client",
-            return_value=fake_client,
+        with (
+            patch("app.api.dependencies.get_supabase_client", return_value=fake_client),
+            patch("app.api.routers.auth.settings.is_admin_email", return_value=False),
         ):
             response = await self.request({"Authorization": "Bearer valid-token"})
 
         self.assertEqual(response.status_code, 200)
+        # /me now returns the server-resolved role + derived name so the
+        # Google OAuth callback can finalize the session without the frontend
+        # ever deciding admin status. No sensitive user_metadata leaks.
         self.assertEqual(
             response.json(),
-            {"user_id": "user-123", "email": "patient@example.com"},
+            {
+                "user_id": "user-123",
+                "email": "patient@example.com",
+                "role": "patient",
+                "name": "patient",
+            },
         )
         self.assertEqual(fake_auth.tokens, ["valid-token"])
+
+    async def test_me_returns_admin_role_for_allowlisted_email(self):
+        # The Google OAuth callback relies on /me to resolve the role. An
+        # allowlisted email → role="admin" (server-resolved from ADMIN_EMAILS),
+        # so the callback routes that user to /admin regardless of how they
+        # authenticated.
+        fake_user = SimpleNamespace(id="admin-9", email="admin@hospital.in")
+        fake_auth = _FakeAuth(user=fake_user)
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with (
+            patch("app.api.dependencies.get_supabase_client", return_value=fake_client),
+            patch("app.api.routers.auth.settings.is_admin_email", return_value=True),
+        ):
+            response = await self.request({"Authorization": "Bearer valid-token"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["role"], "admin")
+        self.assertEqual(body["user_id"], "admin-9")
+        self.assertEqual(body["email"], "admin@hospital.in")
+        self.assertEqual(body["name"], "admin")
 
     async def test_successful_login_returns_access_token_and_safe_role(self):
         fake_user = SimpleNamespace(id="user-123", email="patient@example.com")
@@ -139,6 +169,46 @@ class AuthEndpointTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Invalid email or password.")
+
+    async def test_allowlisted_email_login_returns_admin_role(self):
+        # The server resolves admin status from ADMIN_EMAILS, not the
+        # browser-supplied role field. An allowlisted email → role="admin"
+        # even when the client sends no role claim at all.
+        fake_user = SimpleNamespace(id="admin-1", email="admin@hospital.in")
+        fake_auth = _FakeAuth(user=fake_user)
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with (
+            patch("app.api.routers.auth.get_supabase_client", return_value=fake_client),
+            patch("app.api.routers.auth.settings.is_admin_email", return_value=True),
+        ):
+            response = await self.post(
+                "/api/auth/login",
+                {"email": "admin@hospital.in", "password": "correct"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["role"], "admin")
+
+    async def test_client_supplied_admin_role_is_ignored_for_non_admin_email(self):
+        # A patient who selects the "admin" toggle must NOT receive admin
+        # privileges: the backend returns role="patient" because their email
+        # is not on the allowlist, regardless of the client role claim.
+        fake_user = SimpleNamespace(id="user-123", email="patient@example.com")
+        fake_auth = _FakeAuth(user=fake_user)
+        fake_client = _FakeSupabaseClient(fake_auth)
+
+        with (
+            patch("app.api.routers.auth.get_supabase_client", return_value=fake_client),
+            patch("app.api.routers.auth.settings.is_admin_email", return_value=False),
+        ):
+            response = await self.post(
+                "/api/auth/login",
+                {"email": "patient@example.com", "password": "correct", "role": "admin"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["role"], "patient")
 
     async def test_successful_registration_returns_auth_contract(self):
         fake_user = SimpleNamespace(id="user-456", email="new@example.com")

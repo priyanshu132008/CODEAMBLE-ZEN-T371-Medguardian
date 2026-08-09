@@ -483,6 +483,367 @@ def format_claim_html(dossier: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PDF rendering — server-side Claim Summary Report PDF
+# ---------------------------------------------------------------------------
+
+def format_claim_pdf(dossier: dict) -> bytes:
+    """Render the dossier JSON as a real, selectable-text PDF (A4, paginated).
+
+    Why server-side and not the frontend's html2pdf / jspdf stack:
+      * The dossier is already server-rendered — re-rendering it as text on
+        the server avoids a 1.5MB client bundle (medguardian runs on mobile
+        for elderly patients) AND keeps the output as REAL selectable text,
+        not a rasterized screenshot of styled DOM.
+      * pymupdf is already pinned in requirements.txt (1.26.5) — no new
+        system dependency, no apt-get weasyprint, no Chromium.
+
+    Output is paginated automatically: long medical-necessity rationales or
+    multi-page billing tables flow across A4 pages with running header on
+    each page. PyMuPDF's `insert_textbox` does text-wrap; the page-break is
+    driven by `remaining_rect` math so we never clip content.
+
+    Falls back to the same `_fallback` banner as the HTML report so the
+    operator sees the same warning when the LLM didn't run.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:  # pragma: no cover - pymupdf is in requirements
+        raise RuntimeError(
+            "pymupdf is required for server-side PDF rendering. "
+            "Install with `pip install pymupdf`."
+        ) from exc
+
+    icd_codes = dossier.get("icd10_codes", []) or []
+    bullets = dossier.get("medical_necessity_brief", []) or []
+    summary = dossier.get("claim_summary", {}) or {}
+    line_items = summary.get("line_items", []) or []
+    currency = summary.get("currency", "INR") or "INR"
+    total_cost = summary.get("total_estimated_cost", "pending review")
+    coverage_justification = summary.get("coverage_justification", "pending review")
+    is_fallback = bool(dossier.get("_fallback"))
+
+    # A4 portrait at 72 DPI: 595 x 842 pt. We use a 56-pt margin all round
+    # so the content area is 483 x 730 pt. Same margins as the HTML report
+    # so the two outputs feel consistent.
+    page_w, page_h = 595, 842
+    margin = 56
+    content_w = page_w - 2 * margin
+    content_x = margin
+    top_y = margin
+    bottom_y = page_h - margin
+
+    # Fonts — PyMuPDF ships the PDF Base14 fonts built in. We use the full
+    # Base14 names ("Helvetica", "Helvetica-Bold", "Courier") rather than the
+    # legacy abbreviations ("helv", "cour") because PyMuPDF's font lookup
+    # only matches the full names on the `insert_text` codepath.
+    font_title = "Helvetica-Bold"
+    font_h2 = "Helvetica-Bold"
+    font_body = "Helvetica"
+    font_mono = "Courier"
+
+    # Colour palette mirrors the HTML report (Tailwind indigo/slate scale).
+    COLOR_TITLE = (0.114, 0.443, 0.847)   # #1d4ed8
+    COLOR_H2 = (0.118, 0.227, 0.541)      # #1e3a8a
+    COLOR_MUTED = (0.424, 0.451, 0.502)   # #6b7280
+    COLOR_TOTAL = COLOR_TITLE
+    COLOR_TABLE_HEADER_BG = (0.945, 0.961, 1.0)  # #f1f5ff
+    COLOR_TABLE_BORDER = (0.878, 0.890, 0.969)  # #e0e7ff
+    COLOR_CODE_BG = (0.933, 0.945, 1.0)   # #eef2ff
+
+    doc = fitz.open()
+    page = doc.new_page(width=page_w, height=page_h)
+    cursor_y = top_y
+
+    def _new_page() -> fitz.Page:
+        nonlocal page, cursor_y
+        page = doc.new_page(width=page_w, height=page_h)
+        cursor_y = top_y
+        return page
+
+    def _ensure_space(needed: float) -> None:
+        """Start a new page if `needed` pt wouldn't fit on the current page."""
+        nonlocal cursor_y
+        if cursor_y + needed > bottom_y:
+            _new_page()
+
+    def _draw_running_header() -> None:
+        """Light header on every page so the multi-page PDF stays identifiable."""
+        page.insert_text(
+            (content_x, top_y - 24),
+            "MedGuardian — Claim Summary Report (TPA pre-submission dossier)",
+            fontname=font_body,
+            fontsize=8,
+            color=COLOR_MUTED,
+        )
+
+    def _wrap_text(text: str, fontname: str, fontsize: float, max_width: float) -> List[str]:
+        """Word-wrap a paragraph into lines that fit `max_width` pt."""
+        if not text:
+            return [""]
+        words = str(text).split()
+        lines: List[str] = []
+        current = ""
+        for word in words:
+            candidate = (current + " " + word).strip()
+            if fitz.get_text_length(candidate, fontname=fontname, fontsize=fontsize) <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines or [""]
+
+    def _heading(text: str, color, size: int, fontname: str) -> None:
+        nonlocal cursor_y
+        _ensure_space(size + 6)
+        page.insert_text(
+            (content_x, cursor_y + size),
+            text,
+            fontname=fontname,
+            fontsize=size,
+            color=color,
+        )
+        cursor_y += size + 6
+        if fontname == font_h2:
+            # Underline the h2 the same way the HTML report does (the 2-pt
+            # bottom border). PyMuPDF doesn't have native draw-line for the
+            # page, so we use draw_rect.
+            page.draw_rect(
+                fitz.Rect(content_x, cursor_y, content_x + content_w, cursor_y + 1.5),
+                color=COLOR_TABLE_BORDER,
+                fill=COLOR_TABLE_BORDER,
+                width=0,
+            )
+            cursor_y += 6
+
+    def _paragraph(text: str, color, size: int = 11, fontname: str = font_body, line_height: float = 14) -> None:
+        nonlocal cursor_y
+        for line in _wrap_text(text, fontname, size, content_w):
+            _ensure_space(line_height)
+            page.insert_text(
+                (content_x, cursor_y + size),
+                line,
+                fontname=fontname,
+                fontsize=size,
+                color=color,
+            )
+            cursor_y += line_height
+
+    def _bullet(text: str) -> None:
+        nonlocal cursor_y
+        bullet_x = content_x + 6
+        text_x = content_x + 22
+        # Bullet glyph drawn in line with the first text line.
+        for idx, line in enumerate(_wrap_text(text, font_body, 11, content_w - 22)):
+            _ensure_space(14)
+            if idx == 0:
+                page.insert_text((bullet_x, cursor_y + 11), "•", fontname=font_body, fontsize=11, color=COLOR_H2)
+            page.insert_text((text_x, cursor_y + 11), line, fontname=font_body, fontsize=11, color=(0.12, 0.16, 0.22))
+            cursor_y += 14
+
+    def _table(headers: List[str], rows: List[List[str]], col_widths: List[float], code_columns: set = None) -> None:
+        """Render a simple table with header background and bottom borders.
+
+        `col_widths` are absolute pt, summing to <= content_w. `code_columns`
+        is a set of 0-indexed column numbers rendered with the mono font
+        inside a tinted background (to match the HTML report's <code> pills).
+        """
+        nonlocal cursor_y
+        code_columns = code_columns or set()
+        row_h = 18
+        header_h = 20
+
+        def _col_x(i: int) -> float:
+            return content_x + sum(col_widths[:i])
+
+        def _col_text(i: int) -> str:
+            return headers[i] if i < len(headers) else ""
+
+        # Header
+        _ensure_space(header_h + 4)
+        page.draw_rect(
+            fitz.Rect(content_x, cursor_y, content_x + sum(col_widths), cursor_y + header_h),
+            color=COLOR_TABLE_HEADER_BG,
+            fill=COLOR_TABLE_HEADER_BG,
+            width=0,
+        )
+        for i, w in enumerate(col_widths):
+            page.insert_text(
+                (_col_x(i) + 8, cursor_y + 13),
+                _col_text(i),
+                fontname=font_h2,
+                fontsize=10,
+                color=(0.215, 0.188, 0.639),  # #3730a3
+            )
+        cursor_y += header_h
+        # Underline
+        page.draw_rect(
+            fitz.Rect(content_x, cursor_y, content_x + sum(col_widths), cursor_y + 1),
+            color=COLOR_TABLE_BORDER,
+            fill=COLOR_TABLE_BORDER,
+            width=0,
+        )
+        cursor_y += 2
+
+        # Rows
+        for row in rows:
+            # Split any long cell across multiple visual lines so wide cells
+            # don't clip past the column.
+            wrapped_cells: List[List[str]] = []
+            for i, cell in enumerate(row):
+                fontname = font_mono if i in code_columns else font_body
+                wrapped_cells.append(
+                    _wrap_text(str(cell or ""), fontname, 10, col_widths[i] - 12)
+                )
+            row_line_count = max(len(c) for c in wrapped_cells) if wrapped_cells else 1
+            row_total_h = row_line_count * row_h + 4
+            _ensure_space(row_total_h)
+
+            for i, cell_lines in enumerate(wrapped_cells):
+                x = _col_x(i) + 8
+                if i in code_columns:
+                    # Tinted pill behind the mono text — same look as <code>.
+                    bg_w = min(
+                        col_widths[i] - 4,
+                        max(20.0, fitz.get_text_length(" ".join(cell_lines), fontname=font_mono, fontsize=10) + 10),
+                    )
+                    page.draw_rect(
+                        fitz.Rect(_col_x(i) + 2, cursor_y + 2, _col_x(i) + 2 + bg_w, cursor_y + 12),
+                        color=COLOR_CODE_BG,
+                        fill=COLOR_CODE_BG,
+                        width=0,
+                    )
+                    page.insert_text(
+                        (x, cursor_y + 11),
+                        cell_lines[0] if cell_lines else "",
+                        fontname=font_mono,
+                        fontsize=10,
+                        color=(0.215, 0.188, 0.639),
+                    )
+                else:
+                    for j, line in enumerate(cell_lines):
+                        page.insert_text(
+                            (x, cursor_y + 11 + j * row_h),
+                            line,
+                            fontname=font_body,
+                            fontsize=10,
+                            color=(0.12, 0.16, 0.22),
+                        )
+            cursor_y += row_total_h
+            # Row separator
+            page.draw_rect(
+                fitz.Rect(content_x, cursor_y, content_x + sum(col_widths), cursor_y + 0.5),
+                color=COLOR_TABLE_BORDER,
+                fill=COLOR_TABLE_BORDER,
+                width=0,
+            )
+        cursor_y += 8
+
+    # First-page header
+    _draw_running_header()
+    cursor_y = top_y  # reset because _draw_running_header used top_y for offset math
+
+    # Fallback banner — identical wording to the HTML report.
+    if is_fallback:
+        _ensure_space(40)
+        page.draw_rect(
+            fitz.Rect(content_x, cursor_y, content_x + content_w, cursor_y + 40),
+            color=(1.0, 0.953, 0.804),  # #fff3cd
+            fill=(1.0, 0.953, 0.804),
+            width=0,
+        )
+        _paragraph(
+            "⚠ Automated generation failed — this dossier is a placeholder "
+            "pending manual coder review.",
+            color=(0.522, 0.392, 0.016),
+            size=10,
+        )
+        cursor_y += 8
+
+    # Title block
+    _heading("MedGuardian — Claim Summary Report", COLOR_TITLE, 22, font_title)
+    _paragraph(
+        "Auto-Claim & Insurance Justification Engine · TPA pre-submission dossier",
+        color=COLOR_MUTED,
+        size=9,
+    )
+    cursor_y += 8
+
+    # ICD-10 codes table
+    _heading("ICD-10 Diagnostic Codes", COLOR_H2, 14, font_h2)
+    icd_table_rows = [
+        [c.get("code", ""), c.get("description", ""), c.get("rank", "")]
+        for c in icd_codes
+    ] or [["No codes assigned.", "", ""]]
+    # Column widths sum to content_w (483).
+    _table(
+        headers=["Code", "Description", "Rank"],
+        rows=icd_table_rows,
+        col_widths=[70, 333, 80],
+        code_columns={0},
+    )
+
+    # Medical necessity brief
+    _heading("Medical Necessity Brief", COLOR_H2, 14, font_h2)
+    if bullets:
+        for b in bullets:
+            _bullet(b)
+    else:
+        _bullet("No rationale provided.")
+    cursor_y += 6
+
+    # Billing line items
+    _heading("Billing Line Items & Coverage Justification", COLOR_H2, 14, font_h2)
+    line_table_rows = [
+        [
+            li.get("description", ""),
+            li.get("cpt_or_hcpcs", ""),
+            li.get("estimated_cost", ""),
+            li.get("coverage", ""),
+        ]
+        for li in line_items
+    ] or [["No line items.", "", "", ""]]
+    _table(
+        headers=["Description", "CPT/HCPCS", f"Est. Cost ({currency})", "Coverage"],
+        rows=line_table_rows,
+        col_widths=[200, 70, 75, 138],
+        code_columns={1},
+    )
+
+    # Total + coverage justification (paragraphs, not table).
+    _ensure_space(20)
+    _paragraph(
+        f"Total Estimated Cost: {total_cost}",
+        color=COLOR_TOTAL,
+        size=13,
+        fontname=font_h2,
+        line_height=16,
+    )
+    cursor_y += 4
+    _heading("Coverage Justification", COLOR_H2, 14, font_h2)
+    _paragraph(coverage_justification or "pending review", color=(0.12, 0.16, 0.22), size=11, line_height=15)
+
+    # Add the running header to every subsequent page too (PyMuPDF doesn't
+    # repeat text automatically across pages — we drew page 1's header above
+    # and must redraw for any page that auto-flowed after a long table).
+    for p in range(1, doc.page_count):
+        # Each additional page also gets the running header at the top.
+        p.insert_text(
+            (content_x, top_y - 24),
+            "MedGuardian — Claim Summary Report (TPA pre-submission dossier)",
+            fontname=font_body,
+            fontsize=8,
+            color=COLOR_MUTED,
+        )
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+# ---------------------------------------------------------------------------
 # Patient notification (Resend, graceful fallback)
 # ---------------------------------------------------------------------------
 

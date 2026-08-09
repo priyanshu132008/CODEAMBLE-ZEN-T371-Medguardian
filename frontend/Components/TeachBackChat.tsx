@@ -1,10 +1,20 @@
 'use client';
 
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { evaluateTeachBack, speechToText, textToSpeech } from '../Services/api';
+import { isAxiosError } from 'axios';
+import { evaluateTeachBack, getApiErrorMessage, speechToText, textToSpeech, type ExtractedData, type TeachBackState } from '../Services/api';
 
 export interface TeachBackChatHandle {
   toggleVoice: () => void;
+}
+
+// Safari exposes the Web Audio API constructor as `webkitAudioContext` rather
+// than the standard `AudioContext`. Augment the Window interface so we can
+// reference it without resorting to `as any`.
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -14,7 +24,10 @@ export interface TeachBackChatHandle {
 // ---------------------------------------------------------------------------
 async function audioBlobToWav(blob: Blob): Promise<Blob> {
   const arrayBuf = await blob.arrayBuffer();
-  const Ctx = (window.AudioContext || (window as any).webkitAudioContext);
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) {
+    throw new Error('Web Audio API is not supported in this browser.');
+  }
   const audioCtx = new Ctx({ sampleRate: 16000 });
   try {
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
@@ -56,21 +69,15 @@ async function audioBlobToWav(blob: Blob): Promise<Blob> {
 }
 
 interface TeachBackChatProps {
-  extractedData: any;
-  demoMode: boolean;
+  extractedData: ExtractedData;
   onVoiceChange?: (active: boolean, status: string) => void;
   // Bubbles the live teach-back contract state up to the parent so downstream
   // agents (e.g. Agent 5 claim dossier) can use the comprehension score.
-  onTeachBackChange?: (state: {
-    questions_asked: string[];
-    patient_responses: string[];
-    understanding_score: number;
-    corrections_given: string[];
-  }) => void;
+  onTeachBackChange?: (state: TeachBackState) => void;
 }
 
 const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
-  ({ extractedData, demoMode, onVoiceChange, onTeachBackChange }, ref) => {
+  ({ extractedData, onVoiceChange, onTeachBackChange }, ref) => {
     const [chat, setChat] = useState({
       questions: ["Can you tell me how you will take your Metformin?"],
       responses: [] as string[],
@@ -79,6 +86,9 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
     });
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
+    // Honest submit-failure state — surfaced in the chat so a backend outage
+    // is visible instead of being papered over with a fabricated AI reply.
+    const [submitError, setSubmitError] = useState<string | null>(null);
 
     // Voice recording state
     const [isRecording, setIsRecording] = useState(false);
@@ -171,16 +181,17 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           setVoiceError('Transcription returned empty text.');
           reportVoice(false, 'Transcription was empty — try again.');
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         // Sarvam outages come back as a 503 with `{ "error": "..." }`. Prefer
         // that server-provided message so the user gets the typed-input hint,
         // then fall back to other shapes / a generic failure.
-        const serverError = err?.response?.data?.error;
-        const detail =
-          serverError ||
-          err?.response?.data?.detail ||
-          err?.message ||
-          'Speech-to-text failed.';
+        let detail: unknown = 'Speech-to-text failed.';
+        if (isAxiosError(err)) {
+          const data = err.response?.data as { error?: unknown; detail?: unknown } | undefined;
+          detail = data?.error ?? data?.detail ?? err.message ?? 'Speech-to-text failed.';
+        } else if (err instanceof Error) {
+          detail = err.message;
+        }
         setVoiceError(typeof detail === 'string' ? detail : 'Speech-to-text failed.');
         reportVoice(false, 'STT failed — try again.');
       } finally {
@@ -259,19 +270,7 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
       const userText = input.trim();
       setInput('');
       setLoading(true);
-
-      if (demoMode) {
-        setTimeout(() => {
-          setChat(prev => ({
-            questions: [...prev.questions, "Excellent correction. Next, what specific warning signs mean you must seek immediate clinical emergency evaluation?"],
-            responses: [...prev.responses, userText],
-            corrections: [...prev.corrections, "Correct alignment confirmed. Note: Always ingest Metformin strictly right after heavy meals to protect gastric lining tracks."],
-            score: 88
-          }));
-          setLoading(false);
-        }, 1000);
-        return;
-      }
+      setSubmitError(null);
 
       try {
         const payload = {
@@ -280,11 +279,17 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           corrections_given: chatRef.current.corrections
         };
         const res = await evaluateTeachBack(extractedData, payload, userText);
+        // Trust the backend's teach-back state — never fabricate clinical
+        // questions, corrections, or a passing score. Use nullish-coalescing
+        // (not `||`) so a genuine understanding_score of 0 is preserved rather
+        // than replaced with a fabricated 92 (which would be dangerous for a
+        // medical comprehension check). Missing fields fall back to the
+        // current chat state rather than invented content.
         const updated = {
-          questions: res.questions_asked || [...chatRef.current.questions, "Next, do you know what precautions you must follow?"],
-          responses: res.patient_responses || [...chatRef.current.responses, userText],
-          corrections: res.corrections_given || [...chatRef.current.corrections, "Assessment processed successfully."],
-          score: res.understanding_score || 92
+          questions: res.questions_asked ?? chatRef.current.questions,
+          responses: res.patient_responses ?? [...chatRef.current.responses, userText],
+          corrections: res.corrections_given ?? chatRef.current.corrections,
+          score: res.understanding_score ?? chatRef.current.score ?? 0,
         };
         setChat(updated);
 
@@ -293,13 +298,12 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
         const latestCorrection = updated.corrections[updated.corrections.length - 1];
         const latestQuestion = updated.questions[updated.questions.length - 1];
         void speakText(latestCorrection || latestQuestion || '');
-      } catch {
-        setChat(prev => ({
-          questions: [...prev.questions, "Next, do you know what warning signs mean you must visit the ER?"],
-          responses: [...prev.responses, userText],
-          corrections: [...prev.corrections, "Local response cached. Always consume Metformin right after your morning and evening meals."],
-          score: 85
-        }));
+      } catch (err) {
+        // Honest failure: keep the patient's typed response so it isn't lost,
+        // but do NOT fabricate an AI reply or a passing comprehension score.
+        // Surface the backend error in the chat so the outage is visible.
+        setChat(prev => ({ ...prev, responses: [...prev.responses, userText] }));
+        setSubmitError(getApiErrorMessage(err, 'Couldn’t reach the care guide. Please try again.'));
       } finally {
         setLoading(false);
       }
@@ -379,6 +383,14 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
           <div className="px-4 pt-2">
             <p className="text-[11px] font-semibold text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-1.5">
               {voiceError}
+            </p>
+          </div>
+        )}
+
+        {submitError && (
+          <div className="px-4 pt-2">
+            <p className="text-[11px] font-semibold text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-1.5">
+              {submitError}
             </p>
           </div>
         )}

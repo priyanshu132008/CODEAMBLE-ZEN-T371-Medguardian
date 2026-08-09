@@ -19,3 +19,20 @@ class CalendarConnectionProfile(BaseModel):
     scopes: list[object] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class CalendarStatusResponse(BaseModel):
+    """Safe connection status for the patient portal.
+
+    ``profile`` is the full safe metadata when connected, ``None`` otherwise. No
+    token material (encrypted or otherwise) is ever present in either field.
+    """
+
+    connected: bool
+    profile: CalendarConnectionProfile | None = None
+
+
+class CalendarConnectResponse(BaseModel):
+    """The Google consent URL the frontend navigates to."""
+
+    authorization_url: str

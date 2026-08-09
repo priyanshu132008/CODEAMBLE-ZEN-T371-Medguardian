@@ -3,64 +3,44 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { UploadCloud, FileCheck2, ShieldCheck, AlertCircle } from 'lucide-react';
-import { uploadDocument } from '../Services/api';
+import { uploadDocument, getApiErrorMessage, type ExtractedData, type UploadResponse } from '../Services/api';
 
-// Pre-cached verified extraction payload for DEMO MODE. Lets us bypass the
-// (possibly slow/queued) backend entirely and show the full pipeline instantly
-// during the live presentation. Matches the `extracted` contract in context.md.
-const CACHED_EXTRACTED = {
-  diagnosis: 'Type 2 Diabetes & Post-Myocardial Infarction',
-  medications: [
-    { name: 'Clopidogrel', dosage: '75mg', frequency: 'Once daily', duration: '30 days' },
-    { name: 'Omeprazole', dosage: '40mg', frequency: 'Once daily', duration: '14 days' },
-    { name: 'Metformin', dosage: '500mg', frequency: 'Twice daily after meals', duration: '90 days' },
-  ],
-  precautions: ['Monitor blood sugar daily', 'No heavy lifting'],
-  follow_up_date: '2026-08-15',
-  warning_signs: ['Chest pain', 'Extreme dizziness', 'Blurred vision'],
-};
-
-const DEMO_DELAY_MS = 1500; // brief "Agent 1 processing document..." animation for realism
-
-// ABHA id is exactly 14 digits per ABDM. We gate the upload on a fully-numeric
-// 14-char string so the backend's compliance validation always passes.
-const ABHA_REGEX = /^\d{14}$/;
+// ABDM concept stays alive on the backend + Admin Dashboard (a valid 14-digit
+// ABHA id is still persisted for every upload). To remove live-demo friction we
+// don't make the patient type it — the frontend auto-injects a default valid
+// number so the compliance/DB write path never breaks. ABHA capture/editing
+// remains an Admin-side concern.
+const DEFAULT_ABHA_ID = '12341234123412';
 
 interface UploadZoneProps {
-  onExtracted: (extracted: any, fullState: any) => void;
-  demoMode?: boolean;
+  onExtracted: (extracted: ExtractedData, fullState: UploadResponse | null) => void;
 }
 
-export default function UploadZone({ onExtracted, demoMode = false }: UploadZoneProps) {
+export default function UploadZone({ onExtracted }: UploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
 
-  // DPDP Act 2023 consent gate + ABDM 14-digit ABHA id — both must be satisfied
-  // before the upload CTA activates (the backend 403s without valid consent).
+  // DPDP Act 2023 consent gate — the only thing the patient must do before the
+  // upload CTA activates (the backend 403s without valid consent). The 14-digit
+  // ABHA id is auto-injected on submit, not typed by the patient.
   const [consentGranted, setConsentGranted] = useState(false);
-  const [abhaId, setAbhaId] = useState('');
 
   const inputRef = useRef<HTMLInputElement>(null);
 
   const ACCEPTED = 'image/jpeg,image/png';
 
-  const abhaValid = ABHA_REGEX.test(abhaId.trim());
-  const canUpload = consentGranted && abhaValid && !uploading;
+  const canUpload = consentGranted && !uploading;
 
   const handleFile = useCallback(
     async (file: File) => {
       setError(null);
 
-      // Consent + ABHA gate is enforced even if a file is dropped directly onto
-      // the zone, so a stray drag-and-drop can never bypass the DPDP gate.
+      // Consent gate is enforced even if a file is dropped directly onto the
+      // zone, so a stray drag-and-drop can never bypass the DPDP gate.
       if (!consentGranted) {
         setError('Please grant DPDP Act consent before uploading.');
-        return;
-      }
-      if (!ABHA_REGEX.test(abhaId.trim())) {
-        setError('Enter a valid 14-digit ABHA ID before uploading.');
         return;
       }
 
@@ -72,38 +52,32 @@ export default function UploadZone({ onExtracted, demoMode = false }: UploadZone
       setFileName(file.name);
       setUploading(true);
       try {
-        if (demoMode) {
-          // DEMO MODE: bypass the network entirely. Show a brief processing
-          // animation, then return the pre-cached verified payload instantly.
-          await new Promise((r) => setTimeout(r, DEMO_DELAY_MS));
-          onExtracted(CACHED_EXTRACTED, null);
-          return; // success: parent swaps in the dashboard, unmounting this component
-        }
-
-        // LIVE MODE: real async OCR call to the backend, passing the collected
-        // ABHA id + consent through so the compliance metadata reflects this
-        // patient rather than the legacy mock id.
+        // LIVE MODE: real async OCR call to the backend. The ABHA id is
+        // auto-injected (default valid 14 digits) so the backend + DB still
+        // receive a real ABDM identifier without forcing the patient to type
+        // one. No cached/demo payload — the discharge summary is always
+        // extracted by the real backend pipeline.
         const data = await uploadDocument(file, {
-          abhaId: abhaId.trim(),
+          abhaId: DEFAULT_ABHA_ID,
           consentGranted: true,
         });
         // The contract returns { patient_id, extracted, safety_flags, teach_back, language }.
-        const extracted = data?.extracted ?? data;
-        onExtracted(extracted, data);
+        onExtracted(data.extracted, data);
         return; // success: parent swaps in the dashboard, which unmounts this component
-      } catch (err: any) {
-        // Surface the real failure to the console so silent "infinite spinner"
-        // bugs are diagnosable, and always release the loading state.
-        console.error('[UploadZone] /api/upload failed:', err);
-        const detail = err?.response?.data?.detail || err?.message || 'Upload failed.';
-        setError(typeof detail === 'string' ? detail : 'Upload failed.');
+      } catch (err: unknown) {
+        // Surface the backend's detail message (not the raw error object, which
+        // could carry request headers) so silent "infinite spinner" bugs stay
+        // diagnosable, and always release the loading state.
+        const detail = getApiErrorMessage(err, 'Upload failed.');
+        console.error('[UploadZone] /api/upload failed:', detail);
+        setError(detail);
       } finally {
         // Belt-and-suspenders: the spinner can never get stuck on, regardless
         // of which path (success/error/throw) the request takes.
         setUploading(false);
       }
     },
-    [onExtracted, demoMode, consentGranted, abhaId]
+    [onExtracted, consentGranted]
   );
 
   const onDrop = useCallback(
@@ -139,13 +113,6 @@ export default function UploadZone({ onExtracted, demoMode = false }: UploadZone
     },
     [handleFile]
   );
-
-  // Live ABHA formatting: digits only, capped at 14. Keeps the field readable
-  // and guarantees the regex gate reflects what the user actually typed.
-  const onAbhaChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const digits = e.target.value.replace(/\D/g, '').slice(0, 14);
-    setAbhaId(digits);
-  };
 
   return (
     <div
@@ -213,37 +180,11 @@ export default function UploadZone({ onExtracted, demoMode = false }: UploadZone
               </p>
             </div>
 
-            {/* ----- DPDP Act consent + ABDM ABHA id compliance gate ----- */}
+            {/* ----- DPDP Act consent gate ----- */}
             <div className="w-full max-w-md mt-2 rounded-2xl border border-slate-200 bg-slate-50/80 p-4 text-left space-y-3.5">
-              {/* ABHA id input */}
-              <div>
-                <label className="flex items-center justify-between text-[11px] font-mono font-bold uppercase tracking-wider text-slate-600 mb-1.5">
-                  <span>ABHA ID · 14 digits</span>
-                  <span className={abhaValid ? 'text-emerald-600' : 'text-slate-400'}>
-                    {abhaId.length}/14
-                  </span>
-                </label>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={abhaId}
-                  onChange={onAbhaChange}
-                  placeholder="00000000000000"
-                  className="flex h-11 w-full rounded-xl border bg-white px-3.5 py-2 font-jetbrains tracking-[0.2em] text-base font-bold text-slate-900 placeholder:tracking-[0.2em] placeholder:font-bold placeholder:text-slate-300 transition-all focus-visible:outline-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/30 disabled:opacity-50"
-                  style={{
-                    borderColor: abhaValid
-                      ? 'rgb(16 185 129)'
-                      : abhaId.length > 0
-                        ? 'rgb(244 63 94)'
-                        : 'rgb(203 213 225)',
-                  }}
-                />
-                <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  Enter your 14-digit Ayushman Bharat Health Account number.
-                </p>
-              </div>
-
-              {/* DPDP consent checkbox */}
+              {/* DPDP consent checkbox — the only patient gate. The 14-digit ABHA
+                  id is auto-injected on upload, keeping ABDM compliance alive on
+                  the backend/Admin side without forcing the patient to type it. */}
               <button
                 type="button"
                 onClick={() => setConsentGranted((v) => !v)}
@@ -307,13 +248,7 @@ export default function UploadZone({ onExtracted, demoMode = false }: UploadZone
             {!canUpload && !error && (
               <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
                 <AlertCircle className="h-3 w-3" />
-                <span>
-                  {!consentGranted && !abhaValid
-                    ? 'Consent + 14-digit ABHA required to enable upload'
-                    : !consentGranted
-                      ? 'Grant DPDP consent to enable upload'
-                      : 'Enter a valid 14-digit ABHA ID to enable upload'}
-                </span>
+                <span>Grant DPDP consent to enable upload</span>
               </div>
             )}
             {error && (

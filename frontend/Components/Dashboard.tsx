@@ -1,8 +1,9 @@
 'use client';
 
 import React from 'react';
+import type { ExtractedData, Medication } from '../Services/api';
 
-export default function Dashboard({ extractedData }: { extractedData: any }) {
+export default function Dashboard({ extractedData }: { extractedData: ExtractedData }) {
   return (
     <div className="space-y-6">
       <div className="bg-white/70 backdrop-blur-md border border-slate-200 rounded-3xl p-6 shadow-xl">
@@ -28,7 +29,7 @@ export default function Dashboard({ extractedData }: { extractedData: any }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
-              {extractedData.medications.map((m: any, i: number) => (
+              {extractedData.medications.map((m: Medication, i: number) => (
                 <tr key={i} className="hover:bg-blue-50/30 transition-colors">
                   <td className="px-6 py-4 font-semibold text-slate-900 text-sm">{m.name}</td>
                   <td className="px-6 py-4 font-mono text-slate-600">{m.dosage}</td>

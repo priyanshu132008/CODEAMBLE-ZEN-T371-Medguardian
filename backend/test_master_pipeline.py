@@ -288,8 +288,10 @@ async def run_journey() -> None:
         step(f"compliance_metadata → abha={cm['abdm_abha_id']}, consent={cm['dpdp_consent']}, residency={cm['data_residency']}")
         require(cm["abdm_abha_id"] == "12341234123412", "compliance metadata echoes the ABHA id")
         require(cm["dpdp_consent"] is True, "compliance metadata records dpdp_consent=True")
-        require(cm["data_residency"] == "PHI Retained on Local Edge", "data_residency label correct")
-        require(cm["cloud_transmission"] == "Strictly De-identified Clinical Tokens Only",
+        require(cm["data_residency"] == "Cloud (OpenRouter)", "data_residency label correct")
+        require(cm["cloud_transmission"] == (
+            "Discharge image sent to OpenRouter for vision OCR; clinical data "
+            "sent to OpenRouter for LLM — under DPDP consent"),
                 "cloud_transmission label correct")
 
         # Robust flag search (order-independent) — the drug-drug interaction
@@ -438,8 +440,10 @@ async def run_journey() -> None:
         step(f"claim compliance_metadata → abha={ccm['abdm_abha_id']}, consent={ccm['dpdp_consent']}")
         require(ccm["abdm_abha_id"] == "12341234123412", "claim compliance metadata echoes the ABHA id")
         require(ccm["dpdp_consent"] is True, "claim compliance metadata records dpdp_consent=True")
-        require(ccm["data_residency"] == "PHI Retained on Local Edge", "claim data_residency label correct")
-        require(ccm["cloud_transmission"] == "Strictly De-identified Clinical Tokens Only",
+        require(ccm["data_residency"] == "Cloud (OpenRouter)", "claim data_residency label correct")
+        require(ccm["cloud_transmission"] == (
+            "Discharge image sent to OpenRouter for vision OCR; clinical data "
+            "sent to OpenRouter for LLM — under DPDP consent"),
                 "claim cloud_transmission label correct")
 
         step(f"ICD-10 codes: {[c['code'] for c in dossier['icd10_codes']]}")

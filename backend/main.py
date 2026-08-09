@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # Load environment variables from backend/.env BEFORE importing agents
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -28,16 +28,23 @@ from agents.safety_check import (
 )
 from agents.teach_back import evaluate_teach_back
 from agents.voice_utils import generate_tts, transcribe_stt, SarvamUnavailableError
-from agents.document_intelligence import extract_discharge
+from agents.document_intelligence import extract_discharge, OCRModelUnavailableError
 from agents.privacy_sandbox import PIIScrubber
 from agents.coordinator_engine import dispatch_care_coordination
 from agents.claim_engine import generate_claim_dossier
+from app.api.dependencies import get_current_user
 from app.api.routers.auth import router as auth_router
 from app.api.routers.patients import router as patients_router
+from app.api.routers.calendar import router as calendar_router
+from app.api.routers.reminders import router as reminders_router
+from app.middleware.rate_limiter import RateLimiter
+from app.services.patient_service import upsert_patient_profile
 
 app = FastAPI(title="MedGuardian API", version="0.1.0")
 app.include_router(auth_router)
 app.include_router(patients_router)
+app.include_router(calendar_router)
+app.include_router(reminders_router)
 
 # Privacy Sandbox — every patient-facing free-text input is scrubbed through
 # this PII scrubber before it reaches any external cloud LLM. Shared instance
@@ -100,6 +107,25 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# Rate limiter (mounted AFTER CORS so preflights are handled cleanly).
+#
+# CORS must wrap RateLimiter because the limiter emits its own 429
+# JSON response — those responses need the same Access-Control-* headers
+# as any other response. Starlette middleware ordering is "last added =
+# outermost", so adding CORS first and RateLimiter second means requests
+# flow: client → CORS → RateLimiter → app, and responses flow back the
+# other way.
+#
+# The limiter currently keys on client IP (honouring X-Forwarded-For
+# behind reverse proxies). Per-user attribution would require running
+# the auth dependency ahead of the limiter, which would duplicate the
+# Supabase lookup the route dependency already performs — not worth it
+# for the live-demo threat model.
+# ---------------------------------------------------------------------------
+app.add_middleware(RateLimiter)
+
+
+# ---------------------------------------------------------------------------
 # Request / response models (strict JSON contract)
 # ---------------------------------------------------------------------------
 
@@ -113,8 +139,11 @@ ABHA_ID_PATTERN = re.compile(r"^\d{14}$")
 DPDP_CONSENT_REQUIRED_MESSAGE = (
     "DPDP Act Violation: Patient consent is required to process medical records."
 )
-DATA_RESIDENCY_LABEL = "PHI Retained on Local Edge"
-CLOUD_TRANSMISSION_LABEL = "Strictly De-identified Clinical Tokens Only"
+DATA_RESIDENCY_LABEL = "Cloud (OpenRouter)"
+CLOUD_TRANSMISSION_LABEL = (
+    "Discharge image sent to OpenRouter for vision OCR; clinical data sent to "
+    "OpenRouter for LLM — under DPDP consent"
+)
 
 
 def _normalize_abha_id(abha_id: Optional[str]) -> Optional[str]:
@@ -177,10 +206,6 @@ class TeachBackRequest(BaseModel):
     patient_email: Optional[str] = None
     doctor_email: Optional[str] = None
     language: str = "English"
-
-
-class EscalateSimulateRequest(BaseModel):
-    symptom: str
 
 
 class CoordinatorTriggerRequest(BaseModel):
@@ -255,18 +280,28 @@ async def upload_document(
     file: UploadFile = File(...),
     abha_id: Optional[str] = Form(None),
     consent_granted: bool = Form(True),
+    authorization: Optional[str] = Header(default=None),
 ) -> dict:
-    """Agent 1: accept a photo/scan/PDF of a discharge summary, run vision OCR,
-    and return the structured discharge data as the shared JSON contract state
-    object (context.md). The frontend drives the whole pipeline from this.
+    """Agent 1: accept a photo/scan/PDF of a discharge summary, run vision OCR
+    via OpenRouter, and return the structured discharge data as the shared JSON
+    contract state object (context.md). The frontend drives the whole pipeline
+    from this.
 
     ABDM / DPDP Act 2023 compliance:
       * `consent_granted` MUST be True — a False value is rejected with HTTP 403
         before any medical record is read or processed.
       * `abha_id` (optional) is validated as a 14-digit Ayushman Bharat Health
         Account id when supplied.
-      * The response carries a `compliance_metadata` block attesting to consent,
-        data residency, and the de-identified-only cloud transmission policy.
+      * The discharge image is sent to OpenRouter for vision OCR under the
+        patient's DPDP consent. The response carries a `compliance_metadata`
+        block honestly attesting to consent, the cloud data residency, and the
+        cloud transmission scope.
+
+    Optional identity linkage: if a Bearer token is supplied, the validated
+    Supabase user is upserted into the ``patients`` table so the Admin
+    Command Center can show them in the cohort grid. The upload itself
+    succeeds whether or not the token is present — the demo flow stays
+    anonymous — but a logged-in patient is now visible to admins.
     """
     import uuid
 
@@ -291,6 +326,14 @@ async def upload_document(
 
     try:
         extracted = await extract_discharge(file_bytes, file.content_type)
+    except OCRModelUnavailableError as exc:
+        # OpenRouter OCR failed (model unavailable / rate limited / timed out).
+        # Return a clean, labelled 503 with a human-readable message — never the
+        # raw upstream JSON stack trace — so the frontend can show it verbatim.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": str(exc)},
+        )
     except Exception as exc:  # noqa: BLE001 — surface a clear upstream error
         raise HTTPException(
             status_code=502,
@@ -302,6 +345,37 @@ async def upload_document(
     # the exact shape required as input by /api/teach-back, /api/coordinator/
     # trigger, and /api/claim/generate.
     safety_flags = _run_safety_check_from_extracted(extracted)
+
+    # Identity linkage — if the caller provided a valid Supabase bearer
+    # token, back-fill (or create) the matching ``patients`` row so the
+    # admin cohort listing reflects them. Failures here are best-effort
+    # and never block the upload response.
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token.strip():
+            try:
+                from fastapi.security import HTTPAuthorizationCredentials
+
+                from app.api.dependencies import get_current_user as _gcu
+
+                # Validate the token directly (without the FastAPI dependency
+                # machinery) so the upload can still return 200 on success.
+                current_user = _gcu(
+                    HTTPAuthorizationCredentials(
+                        scheme="Bearer", credentials=token.strip()
+                    )
+                )
+                upsert_patient_profile(
+                    user_id=current_user.user_id,
+                    access_token=token.strip(),
+                    email=current_user.email,
+                    full_name=None,
+                )
+            except Exception:  # noqa: BLE001 - linkage is best-effort
+                # Invalid/expired token → treat as anonymous upload. The
+                # admin cohort will simply not include this row, which is
+                # strictly better than failing the medical-records flow.
+                pass
 
     return {
         "patient_id": str(uuid.uuid4()),
@@ -399,11 +473,28 @@ async def teach_back(request: TeachBackRequest) -> dict:
         request.patient_response, names=names
     )
     print(f"[Privacy Sandbox] Scrubbed Payload (teach-back): {scrubbed_response}")
-    updated_state = await evaluate_teach_back(
-        extracted_data=request.extracted,
-        current_teach_back_state=request.current_teach_back,
-        new_patient_response=scrubbed_response,
-    )
+    try:
+        updated_state = await evaluate_teach_back(
+            extracted_data=request.extracted,
+            current_teach_back_state=request.current_teach_back,
+            new_patient_response=scrubbed_response,
+        )
+    except Exception as exc:  # noqa: BLE001 — AI provider / parse failure → honest 503
+        # OpenRouter is unreachable, both models failed, or the completion was
+        # malformed. Surface a clean 503 (never a fabricated teach-back state or
+        # passing score) so the frontend can retry instead of trusting fake data.
+        print(
+            f"[Teach-Back] LLM evaluation failed ({type(exc).__name__}): {exc}"
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": (
+                    "The care guide is temporarily unavailable. Please try "
+                    "again in a moment."
+                )
+            },
+        )
 
     # Agent 4 auto-trigger — fire only once the teach-back session is complete.
     is_complete, reason = _teach_back_is_complete(updated_state)
@@ -452,16 +543,26 @@ async def voice_chat(
 ) -> dict:
     """
     Unified voice handler for the presentation dashboard.
-    
+
     1. Transcribes incoming audio streaming fragments via Sarvam AI STT.
     2. Seamlessly evaluates the transcription through the Agent 3 Teach-Back pipeline.
     3. Auto-synthesizes response audio via Sarvam AI TTS for total conversational loop logic.
+
+    Any provider failure (Sarvam STT/TTS down, or the teach-back LLM
+    unreachable) returns a labelled 503 JSON response so the frontend can fall
+    back gracefully instead of receiving a 500 or a fabricated conversation.
     """
     import json
-    
+
     # Step 1: Process STT
     audio_bytes = await file.read()
-    patient_text = await transcribe_stt(audio_bytes)
+    try:
+        patient_text = await transcribe_stt(audio_bytes)
+    except SarvamUnavailableError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": exc.user_message},
+        )
 
     # Parse incoming form payloads
     extracted_data = json.loads(extracted_json)
@@ -474,17 +575,40 @@ async def voice_chat(
     scrubbed_text = _pii_scrubber.anonymize_payload(patient_text, names=names)
     print(f"[Privacy Sandbox] Scrubbed Payload (voice/chat): {scrubbed_text}")
 
-    # Step 2: Route directly through Agent 3 Core (with the scrubbed transcript)
-    updated_state = await evaluate_teach_back(
-        extracted_data=extracted_data,
-        current_teach_back_state=current_state,
-        new_patient_response=scrubbed_text,
-    )
+    # Step 2: Route directly through Agent 3 Core (with the scrubbed transcript).
+    # An LLM failure is an honest 503 — never fabricate a teach-back state.
+    try:
+        updated_state = await evaluate_teach_back(
+            extracted_data=extracted_data,
+            current_teach_back_state=current_state,
+            new_patient_response=scrubbed_text,
+        )
+    except Exception as exc:  # noqa: BLE001 — AI provider / parse failure → 503
+        print(f"[Voice Chat] Teach-Back LLM failed ({type(exc).__name__}): {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": (
+                    "The care guide is temporarily unavailable. Please try "
+                    "again in a moment."
+                )
+            },
+        )
 
-    # Step 3: Automatically generate TTS audio for the agent's new question feedback
-    # Extracts the latest question string or falls back cleanly
+    # Step 3: Automatically generate TTS audio for the agent's new question
+    # feedback. TTS is best-effort here too — if Sarvam TTS is down we still
+    # return the text reply so the conversation isn't lost; audio is omitted.
     latest_question = updated_state.get("questions_asked", ["Thank you for completing the verification."])[-1]
-    audio_base64 = await generate_tts(latest_question, "en-IN")
+    try:
+        audio_base64 = await generate_tts(latest_question, "en-IN")
+    except SarvamUnavailableError as exc:
+        return {
+            "status": "success_no_audio",
+            "transcription": scrubbed_text,
+            "updated_state": updated_state,
+            "audio_base64": None,
+            "warning": exc.user_message,
+        }
 
     return {
         "status": "success",
@@ -501,8 +625,18 @@ async def voice_chat(
 
 @app.post("/api/voice/tts")
 async def voice_tts(request: TTSRequest) -> dict:
-    """Convert text to speech; returns a base64-encoded audio string."""
-    audio_base64 = await generate_tts(request.text, request.language)
+    """Convert text to speech; returns a base64-encoded audio string.
+
+    Returns a 503 with a clean JSON message when the Sarvam TTS provider is down
+    so the frontend can keep showing the text reply without breaking.
+    """
+    try:
+        audio_base64 = await generate_tts(request.text, request.language)
+    except SarvamUnavailableError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": exc.user_message},
+        )
     return {"audio_base64": audio_base64}
 
 
@@ -528,54 +662,6 @@ async def voice_stt(file: UploadFile) -> dict:
     scrubbed_transcript = _pii_scrubber.anonymize_payload(transcript)
     print(f"[Privacy Sandbox] Scrubbed Payload (voice/stt): {scrubbed_transcript}")
     return {"text": scrubbed_transcript}
-
-
-# ---------------------------------------------------------------------------
-# Mock endpoints (Agents 4 & 5 — simulated for Phase 1)
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/reminders/simulate")
-def reminders_simulate() -> dict:
-    """Static mock WhatsApp reminder thread for Agent 4 (Adherence)."""
-    return {
-        "thread": [
-            {
-                "role": "system",
-                "message": (
-                    "WhatsApp Reminder: It is time to take your Omeprazole 40mg. "
-                    "Reply 'Done' when you have taken it."
-                ),
-            },
-            {"role": "patient", "message": "Done"},
-            {
-                "role": "system",
-                "message": "Great. Your next medication is Clopidogrel 75mg at 8:00 PM.",
-            },
-        ]
-    }
-
-
-@app.post("/api/escalate/simulate")
-def escalate_simulate(request: EscalateSimulateRequest) -> dict:
-    """Static mock symptom escalation for Agent 5."""
-    symptom = request.symptom.lower()
-    if "chest" in symptom or "pain" in symptom:
-        return {
-            "escalation_level": "high",
-            "message": (
-                "You mentioned chest pain, which is on your doctor's Warning "
-                "Signs list. Please escalate this immediately and go to the "
-                "nearest hospital."
-            ),
-        }
-    return {
-        "escalation_level": "low",
-        "message": (
-            "This symptom is not on your critical warning list, but please "
-            "monitor it. Drink water and rest. If it worsens, contact your clinic."
-        ),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -634,3 +720,75 @@ async def claim_generate(request: ClaimGenerateRequest) -> dict:
         abha_id_clean, consent_granted=True
     )
     return result
+
+
+@app.post("/api/claim/pdf")
+async def claim_pdf(request: ClaimGenerateRequest) -> Response:
+    """Generate the same dossier as ``/api/claim/generate`` and return it as a
+    downloadable A4 PDF.
+
+    Same ABDM / DPDP gates as ``/api/claim/generate`` (consent must be True;
+    14-digit ABHA when supplied). The PDF is rendered server-side with
+    PyMuPDF (``agents.claim_engine.format_claim_pdf``) so the file is real
+    selectable text on A4 pages, not a rasterized screenshot — important for
+    any TPA workflow that does OCR/selection on the dossier.
+
+    Response headers:
+      * ``Content-Type: application/pdf``
+      * ``Content-Disposition: attachment; filename="medguardian-claim-<id>.pdf"``
+        so the browser opens the native Save dialog without us having to
+        script a download in the frontend.
+
+    Why re-run ``generate_claim_dossier`` rather than accepting the dossier
+    from the client: the dossier is the LLM's output (potentially with PHI
+    redactions baked in by the Privacy Sandbox). Trusting a client-supplied
+    dossier would let an attacker forge a TPA submission. Re-running the
+    server pipeline from the same ``patient_data`` keeps the PDF trustworthy.
+    """
+    from agents.claim_engine import format_claim_pdf
+
+    # DPDP consent gate — same gate as /api/claim/generate. The PDF
+    # contains PHI (ICD-10 codes, billing line items) and MUST NOT be
+    # generated without explicit consent.
+    if not request.consent_granted:
+        raise HTTPException(status_code=403, detail=DPDP_CONSENT_REQUIRED_MESSAGE)
+    abha_id_clean = _validate_abha_id(request.abha_id)
+
+    # Re-run the LLM dossier so the PDF reflects the SAME output the JSON
+    # route would have returned (avoiding client-forged PDFs).
+    dossier_result = await generate_claim_dossier(
+        patient_data=request.patient_data,
+        patient_email=request.patient_email,
+    )
+    dossier = dossier_result.get("dossier") or {}
+
+    # Render PDF. pymupdf is in requirements.txt and already loaded by the
+    # claim engine, so this is purely synchronous and adds no extra roundtrip.
+    try:
+        pdf_bytes = format_claim_pdf(dossier)
+    except Exception as exc:  # noqa: BLE001 - PyMuPDF should not fail; be defensive
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF rendering failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    # Filename: "medguardian-claim-<abha-or-uuid>-<yyyymmdd>.pdf". The ABHA
+    # (when supplied) makes the filename identifiable to a hospital records
+    # system; we fall back to a UUID fragment so a missing ABHA never blocks
+    # the download.
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    abha_part = abha_id_clean or str(_uuid.uuid4())[:8]
+    stamp = _dt.utcnow().strftime("%Y%m%d")
+    filename = f"medguardian-claim-{abha_part}-{stamp}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # Cache control: a new dossier = a new PDF; never serve a stale one.
+            "Cache-Control": "no-store",
+        },
+    )

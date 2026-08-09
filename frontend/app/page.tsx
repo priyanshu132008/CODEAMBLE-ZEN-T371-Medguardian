@@ -16,7 +16,6 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { Button } from '@/Components/ui/button';
-import { Badge } from '@/Components/ui/badge';
 import PWAInstallButton from '@/Components/PWAInstallButton';
 import { cn } from '@/lib/utils';
 

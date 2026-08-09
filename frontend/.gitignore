@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# The empty-value template is safe to commit so teammates know which
+# NEXT_PUBLIC_* vars the frontend needs; real secrets stay ignored.
+!.env.example
 
 # vercel
 .vercel

@@ -1,7 +1,7 @@
 """Agent 1: Document Intelligence — vision OCR to structured JSON.
 
 Sends an image (photo/scan of a discharge summary, possibly handwritten) to an
-Ollama vision model and forces a structured extraction matching the
+OpenRouter vision model and forces a structured extraction matching the
 `extracted` object in the shared JSON contract (context.md).
 
 We use plain JSON-in-the-response prompting (not OpenAI tool-calling) because
@@ -9,8 +9,11 @@ the available vision models are inconsistent at tool-calling. The model's text
 response is parsed tolerantly and normalized through Pydantic so the output
 always conforms to the contract, even if the model omits or mis-names fields.
 
-The active Ollama model and timeout are controlled entirely through environment
-variables so the same code can run with different models on different machines.
+OpenRouter (the same provider used by Agents 3 and 5) is OpenAI-compatible, so
+this module runs the same on a laptop and in a Vercel/cloud deploy — there is no
+local-Ollama / localhost dependency. The active model and timeout are
+controlled entirely through environment variables so the same code can run with
+different models on different machines.
 """
 
 from __future__ import annotations
@@ -32,56 +35,67 @@ load_dotenv()
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
-from agents.compliance_guard import (
-    assert_raw_document_endpoint_is_local,
-    configured_local_ai_endpoints,
-)
-
 
 # ---------------------------------------------------------------------------
-# Ollama client
+# OpenRouter vision client (Agent 1 OCR)
 # ---------------------------------------------------------------------------
-# Ollama exposes an OpenAI-compatible API locally.
+# OpenRouter is OpenAI-compatible — the same provider already used by Agent 3
+# (teach-back) and Agent 5 (claim). Routing Agent 1 OCR through OpenRouter
+# removes the local-Ollama dependency so the backend deploys to Vercel/cloud
+# without a localhost bridge.
 #
-# The actual model is selected through OLLAMA_MODEL in .env.
-#
-# Example on the development machine:
-#   OLLAMA_MODEL=gemma3:4b
-#
-# Example on the presentation machine:
-#   OLLAMA_MODEL=mistral-large-3:675b-cloud
+# The actual model is selected through OPENROUTER_VISION_MODEL in .env; the
+# OPENROUTER_API_KEY (shared with Agents 3 & 5) authenticates every call.
 # ---------------------------------------------------------------------------
 
 client = AsyncOpenAI(
-    api_key="ollama",
-    base_url=os.getenv(
-        "OLLAMA_BASE_URL",
-        "http://localhost:11434/v1",
-    ),
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1",
 )
 
-# Model is intentionally configuration-driven.
-MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
+# Primary OCR model — a fast, reliable vision model. This is the modern
+# successor to google/gemini-1.5-flash (now retired on OpenRouter) and was
+# verified live with the project's OPENROUTER_API_KEY. Override per-deploy via
+# OPENROUTER_VISION_MODEL in .env.
+MODEL = os.getenv("OPENROUTER_VISION_MODEL", "google/gemini-2.5-flash")
 
-# No additional fallback models currently configured.
-FALLBACK_MODELS: list[str] = []
+# Fallback vision models tried in order if the primary is unavailable / rate
+# limited. Both are verified-working OpenRouter vision models.
+FALLBACK_MODELS: list[str] = [
+    "google/gemini-2.5-flash-lite",
+]
+
+
+class OCRModelUnavailableError(RuntimeError):
+    """Raised when OCR extraction cannot be completed through OpenRouter — the
+    configured vision model is unavailable (404), rate limited (429), the account
+    lacks access/credits (402), the provider errored, or every model in the
+    chain timed out. Carries a clean, user-facing message so the /api/upload
+    route returns a labelled 503 instead of bubbling up the raw upstream JSON
+    stack trace.
+    """
+
+    def __init__(self, model: str | None = None, *, status_code: int = 503) -> None:
+        self.model = model
+        self.status_code = status_code
+        super().__init__("OCR Extraction failed via OpenRouter.")
 
 
 # ---------------------------------------------------------------------------
 # Extraction timeout
 # ---------------------------------------------------------------------------
-# This is the maximum cumulative amount of time allowed for the extraction.
+# This is the maximum cumulative amount of time allowed for the extraction
+# across the primary model + fallbacks.
 #
 # Configure through:
 #
-#   OLLAMA_TIMEOUT_SECONDS=180
+#   OCR_TIMEOUT_SECONDS=180
 #
-# The per-call timeout below is derived from this value. There is intentionally
-# no hidden 15-second cap because local CPU vision models may require longer.
+# The per-call timeout below is derived from this value.
 # ---------------------------------------------------------------------------
 
 DEADLINE_SECONDS = float(
-    os.getenv("OLLAMA_TIMEOUT_SECONDS", "180")
+    os.getenv("OCR_TIMEOUT_SECONDS", "180")
 )
 
 
@@ -219,16 +233,12 @@ def _pages_content(pages: list) -> list:
 # ---------------------------------------------------------------------------
 
 async def _call_model(model: str, user_content: list, timeout: float = 25.0) -> str | None:
-    """Call one model with a pre-built user message (text and/or images). Returns
-    the text content, or None if the model returned no usable content (e.g. an
-    empty/error response) so the caller can cleanly fall through to the next
-    model. Never raises on a bad response shape — those become None rather than a
-    TypeError that aborts the chain.
+    """Call one OpenRouter vision model with a pre-built user message (text
+    and/or images). Returns the text content, or None if the model returned no
+    usable content (e.g. an empty/error response) so the caller can cleanly fall
+    through to the next model. Never raises on a bad response shape — those
+    become None rather than a TypeError that aborts the chain.
     """
-    assert_raw_document_endpoint_is_local(
-        str(client.base_url),
-        configured_local_ai_endpoints(os.getenv("MEDGUARDIAN_LOCAL_AI_ENDPOINTS")),
-    )
     completion = await client.chat.completions.create(
         model=model,
         messages=[
@@ -492,11 +502,7 @@ async def extract_discharge(file_bytes: bytes, content_type: str | None) -> dict
         if elapsed >= DEADLINE_SECONDS:
             break
 
-        # IMPORTANT:
-        # Do not impose a hidden 15-second limit.
-        #
-        # The remaining time comes directly from
-        # OLLAMA_TIMEOUT_SECONDS in the .env file.
+        # The remaining time comes directly from OCR_TIMEOUT_SECONDS in .env.
         per_call = DEADLINE_SECONDS - elapsed
 
         try:
@@ -506,10 +512,18 @@ async def extract_discharge(file_bytes: bytes, content_type: str | None) -> dict
             )
 
         except asyncio.TimeoutError as exc:
+            print(f"[Document Intelligence] {model} timed out: {exc}")
             last_error = exc
             continue
 
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — any OpenRouter error → next model
+            # 404 model unavailable, 429 rate limited, 402 insufficient credits,
+            # connection error, malformed response, etc. Record and try the next
+            # fallback model; if none succeed, the clean 503 is raised below.
+            print(
+                f"[Document Intelligence] {model} call failed "
+                f"({type(exc).__name__}): {exc}"
+            )
             last_error = exc
             continue
 
@@ -521,10 +535,11 @@ async def extract_discharge(file_bytes: bytes, content_type: str | None) -> dict
     # ---------------------------------------------------------------
 
     if not raw_text:
-        raise RuntimeError(
-            f"Extraction failed or timed out within {DEADLINE_SECONDS}s deadline "
-            f"for all models (input: {pdf_note}). Last error: {last_error!r}"
-        )
+        # Every model in the chain failed (unavailable / rate limited / timed
+        # out / empty). Raise the clean, labelled 503 — never the raw upstream
+        # JSON stack trace. The /api/upload route maps this to the user-facing
+        # error box.
+        raise OCRModelUnavailableError(model=MODEL) from last_error
 
     # ---------------------------------------------------------------
     # Parse model response

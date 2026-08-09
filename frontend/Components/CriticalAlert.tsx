@@ -4,6 +4,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { ShieldAlert, Siren } from 'lucide-react';
 import { Badge } from '@/Components/ui/badge';
+import type { AllergyConflictSafetyFlag, SafetyFlag } from '../Services/api';
 
 /**
  * CriticalAlert — Agent 2 allergy-conflict surface.
@@ -26,12 +27,12 @@ import { Badge } from '@/Components/ui/badge';
  * conflicts — so it is always safe to mount.
  */
 interface CriticalAlertProps {
-  safetyFlags?: any[];
+  safetyFlags?: SafetyFlag[];
 }
 
 export default function CriticalAlert({ safetyFlags }: CriticalAlertProps) {
   const allergyConflicts = (safetyFlags || []).filter(
-    (f) => f?.type === 'allergy_conflict'
+    (f): f is AllergyConflictSafetyFlag => f?.type === 'allergy_conflict',
   );
 
   if (allergyConflicts.length === 0) return null;

@@ -10,21 +10,26 @@ import {
   AlertCircle,
   Mail,
   ShieldCheck,
+  Download,
 } from 'lucide-react';
-import { generateClaimDossier } from '../Services/api';
+import {
+  generateClaimDossier,
+  downloadClaimPDF,
+  getApiErrorMessage,
+  type ClaimDossier as ClaimDossierData,
+  type ComplianceMeta,
+  type ExtractedData,
+  type SafetyFlag,
+  type TeachBackState,
+} from '../Services/api';
 
 interface ClaimDossierProps {
   // Agent 1 output — gates the "Generate" button.
-  extractedData: any;
+  extractedData: ExtractedData;
   // Agent 2 output — forwarded to the claim engine.
-  safetyFlags?: any[];
+  safetyFlags?: SafetyFlag[];
   // Live Agent 3 teach-back state — forwarded for the medical-necessity rationale.
-  teachBackState?: {
-    questions_asked?: string[];
-    patient_responses?: string[];
-    understanding_score?: number;
-    corrections_given?: string[];
-  };
+  teachBackState?: TeachBackState;
   language?: string;
 }
 
@@ -42,10 +47,16 @@ export default function ClaimDossier({
   const [patientEmail, setPatientEmail] = useState(DEFAULT_PATIENT_EMAIL);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dossier, setDossier] = useState<any | null>(null);
+  const [dossier, setDossier] = useState<ClaimDossierData | null>(null);
   const [htmlReport, setHtmlReport] = useState<string | null>(null);
-  const [compliance, setCompliance] = useState<any | null>(null);
+  const [compliance, setCompliance] = useState<ComplianceMeta | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  // PDF download state — separate from `loading` (which is for dossier
+  // generation) so the spinner state is independent. `downloading` only
+  // applies inside the modal; the button is the visual cue.
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [lastDownloadName, setLastDownloadName] = useState<string | null>(null);
 
   const ready = !!extractedData;
 
@@ -77,11 +88,34 @@ export default function ClaimDossier({
       } else {
         setModalOpen(true);
       }
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || 'Claim generation failed.';
-      setError(typeof detail === 'string' ? detail : 'Claim generation failed.');
+    } catch (err: unknown) {
+      setError(getApiErrorMessage(err, 'Claim generation failed.'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  // PDF download handler. Re-uses the same patient data + email as the
+  // dossier so the PDF reflects exactly what the modal is showing. The
+  // backend sets `Content-Disposition: attachment` so the browser opens the
+  // native Save dialog without us changing the modal state — the modal
+  // stays open and the user can download again if needed.
+  const handleDownloadPDF = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const filename = await downloadClaimPDF(
+        patientData,
+        patientEmail.trim() || DEFAULT_PATIENT_EMAIL,
+      );
+      setLastDownloadName(filename);
+    } catch (err: unknown) {
+      setDownloadError(
+        getApiErrorMessage(err, 'PDF download failed. Please try again.'),
+      );
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -200,7 +234,7 @@ export default function ClaimDossier({
             </span>
             {Array.isArray(dossier.icd10_codes) && dossier.icd10_codes.length > 0 && (
               <span className="bg-sky-500/10 border border-sky-400/20 text-sky-200 rounded-lg px-2.5 py-1">
-                ICD-10: {dossier.icd10_codes.map((c: any) => c.code).join(', ')}
+                ICD-10: {dossier.icd10_codes.map((c) => c.code).join(', ')}
               </span>
             )}
             {dossier.claim_summary?.total_estimated_cost && (
@@ -285,6 +319,75 @@ export default function ClaimDossier({
                 </span>
               </div>
             )}
+
+            {/* Action footer — Download PDF (primary, sky tone to match the
+                card's branding) and Close (secondary, slate).
+                Layout strategy:
+                  • Mobile (<sm): status message sits ABOVE the buttons, full-width,
+                    so neither button is ever pushed off-screen.
+                  • ≥sm: status sits to the left of the buttons, taking whatever
+                    horizontal space remains; buttons are `shrink-0` so they
+                    can never be clipped even if the status text is long.
+                The download button has its own busy state so the modal doesn't
+                flicker and stays interactive — the browser handles the Save
+                dialog natively via Content-Disposition, so React state is never
+                affected by the download itself. */}
+            <div className="px-5 py-3 border-t border-slate-200 bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="min-w-0 sm:flex-1">
+                {downloadError ? (
+                  <span className="flex items-center gap-1.5 text-xs text-rose-600">
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{downloadError}</span>
+                  </span>
+                ) : lastDownloadName ? (
+                  <span className="flex items-center gap-1.5 text-xs text-emerald-700">
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">
+                      Saved as <span className="font-mono font-semibold">{lastDownloadName}</span>
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Real selectable-text PDF (A4) — for TPA submission
+                  </span>
+                )}
+              </div>
+              {/* `shrink-0` on every button keeps them on-screen even if the
+                  status text above is wide; `w-full sm:w-auto` makes them
+                  full-width on mobile (easy thumb target) and inline on desktop. */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleDownloadPDF}
+                  disabled={downloading}
+                  className={`inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-all duration-200 shadow-sm w-full sm:w-auto shrink-0 ${
+                    downloading
+                      ? 'bg-sky-700 text-white cursor-wait'
+                      : 'bg-sky-600 hover:bg-sky-700 text-white shadow-sky-500/20'
+                  }`}
+                  aria-label="Download Claim Summary Report as PDF"
+                >
+                  {downloading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Downloading…
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" />
+                      Download PDF
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModalOpen(false)}
+                  className="inline-flex items-center justify-center px-4 py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors w-full sm:w-auto shrink-0"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

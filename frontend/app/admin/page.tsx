@@ -21,8 +21,15 @@ import { Button } from '@/Components/ui/button';
 import { Progress } from '@/Components/ui/progress';
 import LogoutButton from '@/Components/LogoutButton';
 import PWAInstallButton from '@/Components/PWAInstallButton';
-import { cn } from '@/lib/utils';
-import { getPatients, generateClaimDossier, type PatientRecord } from '@/Services/api';
+import {
+  getPatients,
+  generateClaimDossier,
+  getApiErrorMessage,
+  type ClaimCode,
+  type ClaimDossier as ClaimDossierData,
+  type ComplianceMeta,
+  type PatientRecord,
+} from '@/Services/api';
 
 /**
  * Hospital Admin Command Center — high-density fintech data grid for hospital
@@ -52,9 +59,9 @@ export default function AdminPage() {
   // Dossier modal state.
   const [activePatient, setActivePatient] = useState<PatientRecord | null>(null);
   const [generating, setGenerating] = useState(false);
-  const [dossier, setDossier] = useState<any>(null);
+  const [dossier, setDossier] = useState<ClaimDossierData | null>(null);
   const [htmlReport, setHtmlReport] = useState<string | null>(null);
-  const [compliance, setCompliance] = useState<any>(null);
+  const [compliance, setCompliance] = useState<ComplianceMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -64,9 +71,8 @@ export default function AdminPage() {
         setSource(res.source);
         setLoading(false);
       })
-      .catch((e: any) => {
-        const detail = e?.response?.data?.detail || e?.message || 'Unable to reach the patient registry.';
-        setFetchError(typeof detail === 'string' ? detail : 'Unable to reach the patient registry.');
+      .catch((e: unknown) => {
+        setFetchError(getApiErrorMessage(e, 'Unable to reach the patient registry.'));
         setLoading(false);
       });
   }, []);
@@ -93,9 +99,8 @@ export default function AdminPage() {
       setDossier(res?.dossier ?? null);
       setHtmlReport(res?.html_report ?? null);
       setCompliance(res?.compliance_metadata ?? null);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || 'Dossier generation failed.';
-      setError(typeof detail === 'string' ? detail : 'Dossier generation failed.');
+    } catch (err: unknown) {
+      setError(getApiErrorMessage(err, 'Dossier generation failed.'));
     } finally {
       setGenerating(false);
     }
@@ -109,7 +114,7 @@ export default function AdminPage() {
     setError(null);
   };
 
-  const icdCodes: { code: string; description: string }[] =
+  const icdCodes: ClaimCode[] =
     dossier?.icd_codes || dossier?.icd_10_codes || dossier?.diagnosis_codes || [];
 
   const billingTotal =
@@ -167,10 +172,18 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* Data grid */}
+        {/* Data grid
+            Layout strategy:
+              • <sm (mobile): each row becomes a stacked card. Labels appear
+                above each value so the registry stays readable on phones.
+              • ≥sm (tablet+): classic 12-col horizontal table, same as before.
+            The shared outer container has `overflow-hidden` for rounded corners
+            on the data rows — that does NOT prevent horizontal overflow on
+            mobile because the rows themselves stack vertically there. */}
         <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-          {/* Table header */}
-          <div className="bg-slate-900 px-5 py-3 grid grid-cols-12 gap-3 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+          {/* Table header — hidden on mobile, the stacked-card row below
+              uses its own inline labels so the user never loses context. */}
+          <div className="hidden sm:grid bg-slate-900 px-5 py-3 grid-cols-12 gap-3 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
             <div className="col-span-2">Patient ID</div>
             <div className="col-span-3">ABHA ID · 14 digits</div>
             <div className="col-span-2">Name</div>
@@ -229,39 +242,82 @@ export default function AdminPage() {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.3, delay: i * 0.04 }}
-                  className="px-5 py-4 grid grid-cols-12 gap-3 items-center hover:bg-slate-50 transition-colors group"
+                  className="px-5 py-4 hover:bg-slate-50 transition-colors group"
                 >
-                  <div className="col-span-2">
-                    <span className="font-jetbrains text-sm font-bold text-slate-900">{p.patient_id}</span>
-                  </div>
-                  <div className="col-span-3">
-                    <span className="font-jetbrains text-sm font-bold text-blue-700 tracking-wider">{p.abha_id}</span>
-                  </div>
-                  <div className="col-span-2">
-                    <span className="text-sm font-bold text-slate-900">{p.name}</span>
-                  </div>
-                  <div className="col-span-2">
-                    <span className="text-sm font-medium text-slate-600 line-clamp-1">{p.diagnosis}</span>
-                  </div>
-                  <div className="col-span-1">
-                    <Badge tone={STATUS_TONE[p.status]}>{p.status}</Badge>
-                  </div>
-                  <div className="col-span-1">
-                    <div className="flex items-center gap-2">
-                      <Progress value={p.adherence} tone={p.adherence >= 70 ? 'emerald' : 'rose'} className="w-16" />
-                      <span className="text-[11px] font-mono font-bold text-slate-600">{p.adherence}%</span>
+                  {/* Mobile-only stacked card (<sm): each label sits above
+                      its value. The Generate button is full-width at the
+                      bottom for an easy thumb target. */}
+                  <div className="flex flex-col gap-3 sm:hidden">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-jetbrains text-sm font-bold text-slate-900">{p.patient_id}</span>
+                      <Badge tone={STATUS_TONE[p.status]}>{p.status}</Badge>
                     </div>
-                  </div>
-                  <div className="col-span-1 flex justify-end">
+                    <div className="flex flex-col gap-1.5 text-xs">
+                      <div className="flex justify-between gap-3">
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">ABHA</span>
+                        <span className="font-jetbrains font-bold text-blue-700 tracking-wider truncate">{p.abha_id}</span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Name</span>
+                        <span className="font-bold text-slate-900 truncate">{p.name}</span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Diagnosis</span>
+                        <span className="font-medium text-slate-600 line-clamp-2 text-right">{p.diagnosis}</span>
+                      </div>
+                      <div className="flex justify-between items-center gap-3">
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Adherence</span>
+                        <div className="flex items-center gap-2">
+                          <Progress value={p.adherence} tone={p.adherence >= 70 ? 'emerald' : 'rose'} className="w-20" />
+                          <span className="text-[11px] font-mono font-bold text-slate-600">{p.adherence}%</span>
+                        </div>
+                      </div>
+                    </div>
                     <motion.button
                       whileTap={{ scale: 0.96 }}
                       onClick={() => openDossier(p)}
-                      className="relative inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-[10px] font-semibold uppercase tracking-wider px-3 py-2 shadow-md shadow-blue-600/30 transition-all"
+                      className="relative w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-semibold uppercase tracking-wider px-3 py-2.5 shadow-md shadow-blue-600/30 transition-all"
                     >
                       <span className="absolute inset-0 rounded-xl bg-blue-500/40 blur-md opacity-60 -z-10 animate-pulse" />
                       <Sparkles className="h-3.5 w-3.5" />
-                      Generate
+                      Generate TPA Dossier
                     </motion.button>
+                  </div>
+
+                  {/* ≥sm: classic 12-col table row (unchanged). */}
+                  <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
+                    <div className="col-span-2">
+                      <span className="font-jetbrains text-sm font-bold text-slate-900">{p.patient_id}</span>
+                    </div>
+                    <div className="col-span-3">
+                      <span className="font-jetbrains text-sm font-bold text-blue-700 tracking-wider">{p.abha_id}</span>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="text-sm font-bold text-slate-900">{p.name}</span>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="text-sm font-medium text-slate-600 line-clamp-1">{p.diagnosis}</span>
+                    </div>
+                    <div className="col-span-1">
+                      <Badge tone={STATUS_TONE[p.status]}>{p.status}</Badge>
+                    </div>
+                    <div className="col-span-1">
+                      <div className="flex items-center gap-2">
+                        <Progress value={p.adherence} tone={p.adherence >= 70 ? 'emerald' : 'rose'} className="w-16" />
+                        <span className="text-[11px] font-mono font-bold text-slate-600">{p.adherence}%</span>
+                      </div>
+                    </div>
+                    <div className="col-span-1 flex justify-end">
+                      <motion.button
+                        whileTap={{ scale: 0.96 }}
+                        onClick={() => openDossier(p)}
+                        className="relative inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-[10px] font-semibold uppercase tracking-wider px-3 py-2 shadow-md shadow-blue-600/30 transition-all"
+                      >
+                        <span className="absolute inset-0 rounded-xl bg-blue-500/40 blur-md opacity-60 -z-10 animate-pulse" />
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Generate
+                      </motion.button>
+                    </div>
                   </div>
                 </motion.div>
               ))}
@@ -277,7 +333,7 @@ export default function AdminPage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm"
+            className="fixed inset-0 z-[90] flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm"
             onClick={closeDossier}
           >
             <motion.div
@@ -289,28 +345,28 @@ export default function AdminPage() {
               className="relative w-full max-w-3xl max-h-[88vh] overflow-hidden rounded-3xl border border-sky-500/30 bg-gradient-to-br from-sky-900 via-slate-900 to-slate-950 shadow-2xl flex flex-col"
             >
               {/* Modal header */}
-              <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center">
+              <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4 border-b border-white/10">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="h-10 w-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center shrink-0">
                     <FileText className="h-5 w-5 text-blue-400" />
                   </div>
-                  <div>
-                    <h3 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
+                  <div className="min-w-0">
+                    <h3 className="text-base font-bold tracking-tight text-white flex items-center gap-2 truncate">
                       ICD-10 TPA Insurance Dossier
                       <Badge tone="blue">Agent 5</Badge>
                     </h3>
-                    <p className="text-[11px] font-mono text-slate-400 mt-0.5">
+                    <p className="text-[11px] font-mono text-slate-400 mt-0.5 truncate">
                       {activePatient.patient_id} · <span className="font-jetbrains text-blue-300">{activePatient.abha_id}</span> · {activePatient.name}
                     </p>
                   </div>
                 </div>
-                <button onClick={closeDossier} className="text-slate-400 hover:text-white transition-colors" aria-label="Close">
+                <button onClick={closeDossier} className="text-slate-400 hover:text-white transition-colors shrink-0" aria-label="Close">
                   <X className="h-5 w-5" />
                 </button>
               </div>
 
               {/* Modal body */}
-              <div className="px-6 py-5 overflow-y-auto text-white space-y-5">
+              <div className="px-4 py-5 sm:px-6 overflow-y-auto text-white space-y-5">
                 {generating ? (
                   <div className="flex flex-col items-center justify-center gap-3 py-16">
                     <Loader2 className="h-8 w-8 animate-spin text-blue-400" />
@@ -382,10 +438,12 @@ export default function AdminPage() {
                 )}
               </div>
 
-              {/* Modal footer — ABDM/DPDP data-residency footer */}
-              <div className="px-6 py-4 border-t border-white/10 bg-slate-950/60 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5">
+              {/* Modal footer — ABDM/DPDP data-residency footer.
+                  Stacks vertically on mobile (compliance badge → detail → Close)
+                  so nothing clips on narrow viewports. */}
+              <div className="px-4 py-3 sm:px-6 sm:py-4 border-t border-white/10 bg-slate-950/60 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2 min-w-0">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 self-start">
                     <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
                     <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-300">
                       ABDM &amp; DPDP Compliant
@@ -395,7 +453,7 @@ export default function AdminPage() {
                     Data residency: India · Consent-gated · Sovereign storage
                   </span>
                 </div>
-                <Button variant="navy" size="sm" onClick={closeDossier}>
+                <Button variant="navy" size="sm" onClick={closeDossier} className="self-end sm:self-auto">
                   Close
                 </Button>
               </div>

@@ -3,6 +3,13 @@
 The client uses the Supabase publishable/anon key. It is sufficient for
 validating a user's access token through Supabase Auth and does not grant
 privileged database access.
+
+The admin cohort read on `GET /api/patients` is gated by TWO checks: the
+app-layer `require_admin` dependency (which validates the bearer token and
+matches the email against `ADMIN_EMAILS`), AND a database-level RLS policy
+(`patients_admin_select_all`, see `db/schema.sql`) that re-applies the same
+allowlist at the row level. The policy is the second line of defence — the
+service-role key never reads PHI on the request path.
 """
 
 from __future__ import annotations

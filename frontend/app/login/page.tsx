@@ -17,7 +17,15 @@ import { Button } from '@/Components/ui/button';
 import { Input } from '@/Components/ui/input';
 import { Card } from '@/Components/ui/card';
 import { useToasts } from '@/Components/Toast';
-import { authLogin, authRegister, type AuthRole, type AuthSession } from '@/Services/api';
+import {
+  authLogin,
+  authRegister,
+  getApiErrorMessage,
+  type AuthRole,
+  type AuthSession,
+} from '@/Services/api';
+import { supabase, isSupabaseConfigured } from '@/lib/supabaseClient';
+import { persistSession, resolveDeepRedirect } from '@/lib/session';
 import { cn } from '@/lib/utils';
 
 /**
@@ -55,8 +63,6 @@ const ROLE_CONTEXT: Record<
   },
 };
 
-const DEST: Record<AuthRole, string> = { patient: '/patient', admin: '/admin' };
-
 export default function LoginPage() {
   const router = useRouter();
   const { push, Toaster } = useToasts();
@@ -91,73 +97,61 @@ export default function LoginPage() {
         return;
       }
       finalizeSession(session, mode === 'login' ? 'Signed in' : 'Account created');
-    } catch (err: any) {
-      const detail =
-        err?.response?.data?.detail || err?.response?.data?.message || err?.message || 'Authentication failed.';
+    } catch (err: unknown) {
+      const detail = getApiErrorMessage(err, 'Check your credentials and try again.');
       push({
         type: 'error',
         title: 'Authentication failed',
-        message: typeof detail === 'string' ? detail : 'Check your credentials and try again.',
+        message: detail,
       });
       setSubmitting(false);
     }
   };
 
-  // Shared success path: persist session + auth cookie, toast, redirect to the
-  // role portal (or a deep ?redirect= target set by the middleware).
+  // Shared success path: persist session + RBAC cookies, toast, redirect to the
+  // role portal (or a deep ?redirect= target set by the middleware). Uses the
+  // shared lib/session helpers so the Google OAuth callback finalizes the
+  // session identically.
   const finalizeSession = (session: AuthSession, title: string) => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('medguardian_session', JSON.stringify(session));
-      // Auth cookie the route-protection middleware checks. SameSite=Lax,
-      // 24h expiry.
-      document.cookie = `medguardian_auth=1; path=/; max-age=86400; SameSite=Lax`;
-      document.cookie = `medguardian_role=${session.role}; path=/; max-age=86400; SameSite=Lax`;
-    }
-    const redirect =
-      typeof window !== 'undefined'
-        ? new URLSearchParams(window.location.search).get('redirect')
-        : null;
-    // Only honour a deep redirect that matches this session's role portal —
-    // the RBAC proxy would bounce a cross-role redirect anyway, so honouring
-    // it here just avoids a visible double-redirect flash.
-    const rolePortal = DEST[session.role];
-    const redirectValid =
-      !!redirect && (redirect === rolePortal || redirect.startsWith(rolePortal + '/'));
-    const dest = redirectValid ? redirect! : rolePortal;
+    persistSession(session);
+    const dest = resolveDeepRedirect(session.role);
     push({
       type: 'success',
       title,
-      message: session.mock
-        ? `Demo session active — redirecting to ${dest}.`
-        : `Welcome, ${session.name}. Redirecting to ${dest}.`,
+      message: `Welcome, ${session.name}. Redirecting to ${dest}.`,
     });
     setTimeout(() => router.push(dest), 850);
   };
 
-  // Google OAuth — premium "Continue with Google" button. Real OAuth would be
-  // delegated to Supabase (supabase.auth.signInWithOAuth({ provider: 'google' }))
-  // once the backend provider is configured; until then this simulates a
-  // successful Google sign-in for the selected role so the flow is demonstrable.
+  // Google OAuth sign-in (Patient tab only). Starts the real Supabase PKCE
+  // flow — the browser navigates to Google's consent page and back to
+  // /auth/callback, which exchanges the code and finalizes the session via
+  // the backend /api/auth/me (server-resolved role). Admins are restricted to
+  // email/password, so the button only renders on the Patient tab.
   const handleGoogle = async () => {
-    setSubmitting(true);
-    try {
-      // TODO: replace with Supabase signInWithOAuth('google') + redirect callback.
-      await new Promise((r) => setTimeout(r, 700));
-      finalizeSession(
-        {
-          token: `google.${role}.${Date.now()}`,
-          role,
-          email: 'you@gmail.com',
-          name: 'Google User',
-          abha_id: '12341234123412',
-          mock: true,
-        },
-        'Signed in with Google'
-      );
-    } catch {
-      push({ type: 'error', title: 'Google sign-in failed', message: 'Please try again.' });
-      setSubmitting(false);
+    if (!isSupabaseConfigured || !supabase) {
+      push({
+        type: 'error',
+        title: 'Google sign-in unavailable',
+        message:
+          'Supabase is not configured on the frontend. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.',
+      });
+      return;
     }
+    setSubmitting(true);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: `${window.location.origin}/auth/callback` },
+    });
+    if (error) {
+      push({ type: 'error', title: 'Google sign-in failed', message: error.message });
+      setSubmitting(false);
+      return;
+    }
+    // On success the Supabase client navigates the browser to Google's
+    // consent page and back to /auth/callback, which exchanges the code and
+    // finalizes the session. This page unmounts on redirect, so no state
+    // reset is needed.
   };
 
   const ctx = ROLE_CONTEXT[role];
@@ -261,34 +255,40 @@ export default function LoginPage() {
               ))}
             </div>
 
-            {/* Google OAuth — premium white/gray button contrasting the navy card.
-                STRICT RBAC: admins may ONLY authenticate via email/password, so
-                the Google button (and its divider) is hidden entirely when the
-                Hospital Admin tab is selected. */}
+            {/* Continue with Google — Patient tab ONLY. Admins are restricted to
+                email/password. This starts the real Supabase PKCE OAuth flow
+                (no mock token): the browser redirects to Google's consent page
+                and back to /auth/callback, which exchanges the code and
+                finalizes the session via the server-resolved /api/auth/me. */}
             {role === 'patient' && (
-              <>
+              <div className="mb-5">
                 <button
                   type="button"
                   onClick={handleGoogle}
                   disabled={submitting}
-                  className="w-full flex items-center justify-center gap-3 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold text-sm py-3 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                  aria-label="Continue with Google"
+                  className="group flex w-full items-center justify-center gap-3 rounded-xl bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 transition-all hover:bg-slate-50 hover:ring-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <svg className="h-5 w-5" viewBox="0 0 24 24" aria-hidden="true">
-                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.76h3.56c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.56-2.76c-.98.66-2.23 1.06-3.72 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23z" />
-                    <path fill="#FBBC05" d="M5.84 14.1a6.6 6.6 0 0 1 0-4.2V7.06H2.18a11 11 0 0 0 0 9.88l3.66-2.84z" />
-                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84C6.71 7.3 9.14 5.38 12 5.38z" />
-                  </svg>
+                  {submitting ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                  ) : (
+                    <svg className="h-5 w-5 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1Z" />
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23Z" />
+                      <path fill="#FBBC05" d="M5.84 14.1a6.6 6.6 0 0 1 0-4.2V7.06H2.18a11 11 0 0 0 0 9.88l3.66-2.84Z" />
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1A11 11 0 0 0 2.18 7.06l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38Z" />
+                    </svg>
+                  )}
                   Continue with Google
                 </button>
-
-                {/* Divider */}
-                <div className="flex items-center gap-3 my-1">
-                  <div className="h-px flex-1 bg-white/10" />
-                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">or with email</span>
-                  <div className="h-px flex-1 bg-white/10" />
+                <div className="mt-4 flex items-center gap-3" aria-hidden="true">
+                  <span className="h-px flex-1 bg-white/10" />
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-500">
+                    or sign in with email
+                  </span>
+                  <span className="h-px flex-1 bg-white/10" />
                 </div>
-              </>
+              </div>
             )}
 
             {/* Form */}

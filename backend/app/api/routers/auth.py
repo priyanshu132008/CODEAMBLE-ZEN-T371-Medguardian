@@ -5,8 +5,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.dependencies import AuthenticatedUser, get_current_user
+from app.core.config import settings
 from app.db.supabase_client import get_supabase_client
-from app.schemas.auth import AuthCredentials, AuthResponse
+from app.schemas.auth import AuthCredentials, AuthMeResponse, AuthResponse
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -32,6 +33,13 @@ def _auth_response(auth_result: Any, fallback_email: str) -> AuthResponse:
     email = _user_email(user, fallback_email)
     user_id = getattr(user, "id", None)
 
+    # Admin status is resolved by the SERVER from the validated Supabase user's
+    # email against the ADMIN_EMAILS allowlist — never from the browser-supplied
+    # role field (which is accepted for API compatibility but ignored). A user
+    # who is not on the allowlist is always "patient", regardless of what the
+    # login form's role toggle claimed.
+    role = "admin" if settings.is_admin_email(email) else "patient"
+
     # Do not derive privileges or ABHA from browser input or arbitrary metadata.
     return AuthResponse(
         access_token=str(access_token) if access_token else None,
@@ -39,7 +47,7 @@ def _auth_response(auth_result: Any, fallback_email: str) -> AuthResponse:
         user_id=str(user_id) if user_id else None,
         email=email,
         name=_user_name(user, email),
-        role="patient",
+        role=role,
         abha_id=None,
         email_confirmation_required=not bool(access_token),
     )
@@ -142,9 +150,26 @@ async def login(credentials: AuthCredentials) -> AuthResponse:
     return response
 
 
-@router.get("/me", response_model=AuthenticatedUser)
+@router.get("/me", response_model=AuthMeResponse)
 async def get_authenticated_user(
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> AuthenticatedUser:
-    """Return the identity represented by the validated Supabase token."""
-    return current_user
+) -> AuthMeResponse:
+    """Return the authenticated identity with the SERVER-RESOLVED role.
+
+    The frontend Google OAuth callback sends the Supabase access token here to
+    finalize the session: the backend validates the token (via
+    ``get_current_user``) and returns the authoritative role — ``admin`` only
+    when the validated email is on the ``ADMIN_EMAILS`` allowlist, else
+    ``patient``. The frontend therefore never decides admin status; an
+    allowlisted email signing in through Google is routed to ``/admin``, a
+    non-allowlisted one to ``/patient``, exactly as the email/password flow.
+    """
+    email = current_user.email
+    role = "admin" if settings.is_admin_email(email) else "patient"
+    name = email.split("@", 1)[0] if email else "User"
+    return AuthMeResponse(
+        user_id=current_user.user_id,
+        email=email,
+        role=role,
+        name=name,
+    )

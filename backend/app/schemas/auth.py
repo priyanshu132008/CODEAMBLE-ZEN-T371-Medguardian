@@ -37,3 +37,21 @@ class AuthResponse(BaseModel):
     role: str = "patient"
     abha_id: str | None = None
     email_confirmation_required: bool = False
+
+
+class AuthMeResponse(BaseModel):
+    """Server-resolved identity for an already-authenticated token.
+
+    Used by the Google OAuth callback (and any client that needs the
+    authoritative role): the frontend sends the Supabase access token, the
+    backend validates it and returns the role the SERVER resolved from the
+    ``ADMIN_EMAILS`` allowlist — so admin status is never decided client-side.
+
+    ``name`` is derived from the email local part (``get_current_user`` only
+    returns ``user_id`` + ``email``; no sensitive user metadata is surfaced).
+    """
+
+    user_id: str
+    email: str | None = None
+    role: str = "patient"
+    name: str
