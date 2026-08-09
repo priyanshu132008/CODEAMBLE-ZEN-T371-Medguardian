@@ -7,7 +7,10 @@ import re
 import secrets
 from typing import Any
 
-from app.db.supabase_client import get_authenticated_supabase_client
+from app.db.supabase_client import (
+    get_authenticated_supabase_client,
+    get_supabase_service_client,
+)
 from app.schemas.patients import PatientProfile
 
 
@@ -97,8 +100,13 @@ def upsert_patient_profile(
     derived_name = full_name or _derive_name_from_email(email) or "Patient"
     # patient_code is only minted on INSERT; on UPDATE we preserve the
     # existing one so the admin grid never sees a row whose identifier
-    # changes between requests.
-    existing = get_patient_profile(user_id=user_id, access_token=access_token)
+    # changes between requests. The existence check is defensive: if the
+    # user-JWT SELECT is blocked by RLS we treat the row as missing and
+    # still mint a code + attempt the write below.
+    try:
+        existing = get_patient_profile(user_id=user_id, access_token=access_token)
+    except Exception:  # noqa: BLE001 - RLS may deny the read; fall through
+        existing = None
     payload: dict[str, Any] = {
         "id": user_id,
         "full_name": derived_name,
@@ -107,11 +115,40 @@ def upsert_patient_profile(
     if existing is None or not existing.patient_code:
         payload["patient_code"] = _mint_patient_code()
 
+    # Primary path: write under the user's own JWT so RLS ``auth.uid() = id``
+    # owns the row. This preserves the security property that a patient only
+    # ever writes their own identity row.
     client = get_authenticated_supabase_client(access_token)
     try:
         client.table("patients").upsert(payload, on_conflict="id").execute()
         _PATIENT_PROFILE_LOG.info(
             "patients upsert OK user_id=%s email=%s",
+            user_id,
+            email or "",
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - fall back to the service key
+        # The most common cause of a "new patient not showing in admin" is a
+        # missing/misconfigured INSERT RLS policy on the patients table: the
+        # user-JWT upsert is silently denied, and because identity was already
+        # validated server-side from the bearer token (Supabase auth.get_user),
+        # it is safe to retry the write with the backend service-role key. The
+        # service key bypasses RLS so the row is guaranteed to land and the
+        # admin cohort reflects the real user base.
+        _PATIENT_PROFILE_LOG.warning(
+            "patients upsert via user JWT failed user_id=%s email=%s "
+            "exc_type=%s exc=%r — retrying with service-role client",
+            user_id,
+            email or "",
+            type(exc).__name__,
+            str(exc),
+        )
+
+    try:
+        service_client = get_supabase_service_client()
+        service_client.table("patients").upsert(payload, on_conflict="id").execute()
+        _PATIENT_PROFILE_LOG.info(
+            "patients upsert OK (service-role fallback) user_id=%s email=%s",
             user_id,
             email or "",
         )

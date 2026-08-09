@@ -76,10 +76,25 @@ interface TeachBackChatProps {
   onTeachBackChange?: (state: TeachBackState) => void;
 }
 
+/**
+ * Build the opening teach-back question from the patient's CURRENT first
+ * medication, never a hard-coded drug name. Previously this seeded
+ * "Can you tell me how you will take your Metformin?" unconditionally, so even
+ * after a brand-new discharge summary was uploaded (registering Levofloxacin in
+ * the Treatment Registry) the chat kept asking about Metformin from a previous
+ * session. Deriving the seed from `extractedData.medications` makes the first
+ * AI bubble reflect the regimen the patient was actually just discharged on.
+ */
+function seedQuestion(medications: ExtractedData['medications']): string[] {
+  const first = medications?.[0]?.name?.trim();
+  if (first) return [`Can you tell me how you will take your ${first}?`];
+  return ['Can you tell me how you will take your medicines?'];
+}
+
 const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
   ({ extractedData, onVoiceChange, onTeachBackChange }, ref) => {
     const [chat, setChat] = useState({
-      questions: ["Can you tell me how you will take your Metformin?"],
+      questions: seedQuestion(extractedData.medications),
       responses: [] as string[],
       corrections: [] as string[],
       score: undefined as number | undefined
@@ -109,6 +124,24 @@ const TeachBackChat = forwardRef<TeachBackChatHandle, TeachBackChatProps>(
     // Keep the latest chat snapshot for building teach-back payloads.
     const chatRef = useRef(chat);
     useEffect(() => { chatRef.current = chat; }, [chat]);
+
+    // Reset the conversation when a NEW discharge summary is uploaded — i.e.
+    // when the leading medication changes. Without this the chat keeps showing
+    // the previous regimen's seed question (e.g. "Metformin") even after a
+    // fresh upload registered a different medicine (e.g. Levofloxacin) in the
+    // Treatment Registry. A fresh regimen is a fresh conversation: stale Q&A
+    // from the old medicines is no longer clinically relevant, so we clear
+    // responses/corrections/score alongside the seed question.
+    const firstMedName = extractedData.medications[0]?.name ?? '';
+    useEffect(() => {
+      setChat({
+        questions: seedQuestion(extractedData.medications),
+        responses: [],
+        corrections: [],
+        score: undefined,
+      });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [firstMedName]);
 
     // Bubble the live teach-back contract state up to the parent whenever it
     // changes, so downstream agents (Agent 5 claim dossier) can read the

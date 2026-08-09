@@ -1,7 +1,15 @@
 // frontend/services/api.ts
 import axios, { isAxiosError } from 'axios';
 
-const API_BASE = 'http://localhost:8000/api';
+// Backend API origin. In development this defaults to the local FastAPI server.
+// In production (and for real mobile devices, which cannot reach your dev
+// machine's localhost) set NEXT_PUBLIC_API_BASE_URL to the deployed backend
+// origin, e.g. https://medguardian-api.up.railway.app. A trailing slash is
+// tolerated and stripped. Every call site below builds on `API_BASE`, so this
+// is the single place to re-point the frontend at a different backend.
+const API_ORIGIN =
+  (process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000').replace(/\/+$/, '');
+const API_BASE = `${API_ORIGIN}/api`;
 
 // ---------------------------------------------------------------------------
 // Shared domain types — the MedGuardian JSON contract (context.md).
@@ -195,10 +203,30 @@ export const evaluateTeachBack = async (
   currentTeachBack: Partial<TeachBackState>,
   patientResponse: string,
 ): Promise<TeachBackState> => {
+  // Send the validated Supabase user id as patient_id so the backend can re-read
+  // the patient's LATEST discharge summary from Supabase on every message and
+  // overlay it onto `extracted` before the LLM runs. This is the frontend half
+  // of the "stale Metformin" fix — without it the backend overlay no-ops and
+  // the LLM is grounded in whatever `extracted` the chat happened to hold.
+  // Falls back to undefined (anonymous/demo flow) so the chat still works
+  // without a signed-in user.
+  let patient_id: string | undefined;
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem('medguardian_session');
+      if (raw) {
+        const session = JSON.parse(raw) as AuthSession;
+        patient_id = session.user_id || undefined;
+      }
+    } catch {
+      // malformed session — proceed without patient_id
+    }
+  }
   const response = await axios.post<TeachBackState>(`${API_BASE}/teach-back`, {
     extracted,
     current_teach_back: currentTeachBack,
     patient_response: patientResponse,
+    patient_id,
     // Hardcoded verified delivery address for the Agent 4 auto-trigger. In
     // Resend sandbox mode the sandbox sender (resend.dev) may only deliver to
     // the account owner's verified address, so both the patient + doctor
@@ -364,6 +392,11 @@ export interface AuthSession {
   role: AuthRole;
   email: string;
   name: string;
+  // Validated Supabase auth uid. Populated from /api/auth/login + /api/auth/me
+  // so client-side flows that need the server-side user id (e.g. sending
+  // patient_id to /api/teach-back for the fresh-prescription overlay) can read
+  // it from the persisted session without a extra round-trip.
+  user_id?: string;
   abha_id?: string;
   email_confirmation_required?: boolean;
   mock?: boolean;
@@ -404,6 +437,7 @@ async function authRequest(path: string, payload: AuthPayload): Promise<AuthSess
     role: (d.role || 'patient') as AuthRole,
     email: d.email || payload.email,
     name: d.name || payload.email.split('@')[0],
+    user_id: d.user_id || undefined,
     abha_id: d.abha_id ?? undefined,
     email_confirmation_required: Boolean(d.email_confirmation_required),
     mock: false,

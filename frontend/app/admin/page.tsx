@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   Database,
   Activity,
+  Download,
 } from 'lucide-react';
 import { Badge } from '@/Components/ui/badge';
 import { Button } from '@/Components/ui/button';
@@ -24,6 +25,7 @@ import PWAInstallButton from '@/Components/PWAInstallButton';
 import {
   getPatients,
   generateClaimDossier,
+  downloadClaimPDF,
   getApiErrorMessage,
   type ClaimCode,
   type ClaimDossier as ClaimDossierData,
@@ -63,6 +65,9 @@ export default function AdminPage() {
   const [htmlReport, setHtmlReport] = useState<string | null>(null);
   const [compliance, setCompliance] = useState<ComplianceMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // True while the server-side /api/claim/pdf render is in flight. Drives the
+  // Download PDF button's busy state and disables it (and Close stays enabled).
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     getPatients()
@@ -112,6 +117,32 @@ export default function AdminPage() {
     setHtmlReport(null);
     setCompliance(null);
     setError(null);
+  };
+
+  // Download the generated dossier as a server-rendered PDF. Re-uses the SAME
+  // patientData shape (and ABHA id + consent) that openDossier sent to
+  // /api/claim/generate, so the PDF reflects the dossier the admin is looking
+  // at — never a client-supplied payload. Gated on a successfully generated
+  // dossier so the button can't fire mid-generation or on an error state.
+  const handleDownloadPDF = async () => {
+    if (!activePatient || generating || !dossier) return;
+    setDownloading(true);
+    try {
+      const patientData = {
+        patient_id: activePatient.patient_id,
+        extracted: activePatient.extracted,
+        safety_flags: activePatient.safety_flags,
+        teach_back: { questions_asked: [], patient_responses: [], understanding_score: 0, corrections_given: [] },
+      };
+      await downloadClaimPDF(patientData, 'priyanshucreator3@gmail.com', {
+        abhaId: activePatient.abha_id,
+        consentGranted: true,
+      });
+    } catch (err: unknown) {
+      setError(getApiErrorMessage(err, 'PDF download failed.'));
+    } finally {
+      setDownloading(false);
+    }
   };
 
   const icdCodes: ClaimCode[] =
@@ -438,9 +469,11 @@ export default function AdminPage() {
                 )}
               </div>
 
-              {/* Modal footer — ABDM/DPDP data-residency footer.
-                  Stacks vertically on mobile (compliance badge → detail → Close)
-                  so nothing clips on narrow viewports. */}
+              {/* Modal footer — ABDM/DPDP data-residency footer + actions.
+                  Stacks vertically on mobile (compliance badge → detail →
+                  action buttons) so nothing clips on narrow viewports. The two
+                  action buttons sit side-by-side on ≥sm and stack on mobile;
+                  each is shrink-0 + w-full/w-auto so the row can't overflow. */}
               <div className="px-4 py-3 sm:px-6 sm:py-4 border-t border-white/10 bg-slate-950/60 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2 min-w-0">
                   <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 self-start">
@@ -453,9 +486,32 @@ export default function AdminPage() {
                     Data residency: India · Consent-gated · Sovereign storage
                   </span>
                 </div>
-                <Button variant="navy" size="sm" onClick={closeDossier} className="self-end sm:self-auto">
-                  Close
-                </Button>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    onClick={handleDownloadPDF}
+                    disabled={downloading || generating || !dossier}
+                    className="w-full sm:w-auto shrink-0"
+                  >
+                    {downloading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5" />
+                    )}
+                    {downloading ? 'Downloading…' : 'Download PDF'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="navy"
+                    size="sm"
+                    onClick={closeDossier}
+                    className="w-full sm:w-auto shrink-0"
+                  >
+                    Close
+                  </Button>
+                </div>
               </div>
             </motion.div>
           </motion.div>

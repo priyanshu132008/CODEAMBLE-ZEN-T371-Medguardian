@@ -27,14 +27,12 @@
 // server-side, inside the patient portal.
 
 import { useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { getMe, getApiErrorMessage, type AuthSession } from '@/Services/api';
 import { persistSession, portalForRole } from '@/lib/session';
 
 export default function AuthCallbackPage() {
-  const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   // Guard against React StrictMode's double-invoked effects so the exchange +
   // /me call fire exactly once.
@@ -80,23 +78,29 @@ export default function AuthCallbackPage() {
           role: me.role,
           email: me.email,
           name: me.name,
+          user_id: me.user_id,
           mock: false,
         };
         persistSession(authSession);
-        router.replace(portalForRole(me.role));
+        // HARD navigation (not router.replace): a soft client-side navigation
+        // can serve the App Router's stale prefetched redirect-to-/login for
+        // the gated portal route. A full page load carries the just-set
+        // medguardian_auth cookie and bypasses that cache, so the user lands in
+        // the portal on the first sign-in instead of needing two attempts.
+        window.location.replace(portalForRole(me.role));
       } catch (err) {
         if (cancelled) return;
         setError(getApiErrorMessage(err, 'Google sign-in did not complete.'));
         // Give the user a moment to read the error, then return to login so
         // they can retry with email/password.
-        setTimeout(() => router.replace('/login'), 2500);
+        setTimeout(() => window.location.replace('/login'), 2500);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, []);
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4 text-slate-900">

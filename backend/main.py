@@ -39,6 +39,11 @@ from app.api.routers.calendar import router as calendar_router
 from app.api.routers.reminders import router as reminders_router
 from app.middleware.rate_limiter import RateLimiter
 from app.services.patient_service import upsert_patient_profile
+from app.services.prescription_lookup import (
+    fetch_latest_prescriptions,
+    merge_ground_truth,
+    persist_discharge_summary,
+)
 
 app = FastAPI(title="MedGuardian API", version="0.1.0")
 app.include_router(auth_router)
@@ -200,6 +205,15 @@ class TeachBackRequest(BaseModel):
     extracted: dict
     current_teach_back: dict
     patient_response: str
+    # Optional patient id — when present, the backend re-reads the
+    # patient's LATEST discharge summary from Supabase and overlays it
+    # onto the frontend-supplied ``extracted`` payload before sending to
+    # the LLM. This prevents stale medication state from leaking into
+    # the teach-back prompt (e.g. the chat still asking about Metformin
+    # after a fresh Levofloxacin / Paracetamol upload). When absent the
+    # backend uses the frontend payload as-is so the demo still works
+    # offline / without auth.
+    patient_id: Optional[str] = None
     # Optional session context for the Agent 4 auto-trigger. When omitted,
     # fallback demo emails are used so the coordinator still fires for demos.
     safety_flags: List[dict] = []
@@ -371,6 +385,15 @@ async def upload_document(
                     email=current_user.email,
                     full_name=None,
                 )
+                # Persist the authoritative extraction so Agent 3 (teach-back)
+                # re-reads the patient's CURRENT medications on every chat
+                # message rather than trusting the frontend's cached state.
+                # Best-effort: a missing discharge_summaries table or a
+                # Supabase outage is swallowed so the upload never 5xxs.
+                persist_discharge_summary(
+                    user_id=current_user.user_id,
+                    extracted=extracted,
+                )
             except Exception:  # noqa: BLE001 - linkage is best-effort
                 # Invalid/expired token → treat as anonymous upload. The
                 # admin cohort will simply not include this row, which is
@@ -473,9 +496,29 @@ async def teach_back(request: TeachBackRequest) -> dict:
         request.patient_response, names=names
     )
     print(f"[Privacy Sandbox] Scrubbed Payload (teach-back): {scrubbed_response}")
+
+    # Fresh-prescription overlay — when a patient_id is supplied, re-read the
+    # authoritative discharge summary from Supabase so the LLM prompt is
+    # grounded in the CURRENT medications, not the frontend's last-known
+    # state. This is the server-side half of the "stale Metformin" fix:
+    #   frontend half = drop the hardcoded seed question
+    #                   (Components/TeachBackChat.tsx)
+    #   backend half  = this overlay
+    # The overlay is best-effort: any failure (no row, table missing,
+    # Supabase down) falls back to the frontend payload so the chat
+    # never breaks.
+    db_extracted = fetch_latest_prescriptions(request.patient_id)
+    ground_truth_extracted = merge_ground_truth(request.extracted, db_extracted)
+    if db_extracted:
+        print(
+            f"[Teach-Back] Using prescriptions from {db_extracted.get('source')} "
+            f"for patient_id={request.patient_id} "
+            f"(meds={len(db_extracted.get('medications') or [])})"
+        )
+
     try:
         updated_state = await evaluate_teach_back(
-            extracted_data=request.extracted,
+            extracted_data=ground_truth_extracted,
             current_teach_back_state=request.current_teach_back,
             new_patient_response=scrubbed_response,
         )

@@ -27,7 +27,7 @@ from app.api.dependencies import (
     get_current_user,
     require_admin,
 )
-from app.db.supabase_client import get_supabase_client
+from app.db.supabase_client import get_authenticated_supabase_client, get_supabase_client
 from app.schemas.patients import PatientProfile
 from app.services.patient_service import get_patient_profile
 
@@ -75,6 +75,7 @@ def _map_row(row: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("")
 def list_patients(
     current_user: AuthenticatedUser = Depends(require_admin),
+    access_token: str = Depends(get_current_access_token),
 ) -> Dict[str, Any]:
     """Return the patient registry from Supabase, or an empty list.
 
@@ -82,6 +83,14 @@ def list_patients(
     authenticates the bearer token AND authorizes the caller against the
     ``ADMIN_EMAILS`` allowlist; the server resolves admin status from the
     validated Supabase email, never from any client-supplied claim.
+
+    The admin's own access token is forwarded to PostgREST
+    (``get_authenticated_supabase_client``) so the database-level
+    ``patients_admin_select_all`` RLS policy — which re-applies the same
+    email allowlist against ``auth.jwt() ->> 'email'`` — actually matches.
+    Without forwarding the JWT the anon client has no user identity, the
+    admin policy never matches, and newly registered patients are invisible
+    to the admin console even though their row exists.
 
     ``source`` is "supabase" when the database query ran (even with zero rows),
     and "unconfigured" when Supabase isn't wired at all. No fabricated cohort is
@@ -99,7 +108,10 @@ def list_patients(
         "list_patients: route entered admin_email=%s", current_user.email
     )
     try:
-        client = get_supabase_client()
+        # Forward the admin's JWT to PostgREST so the patients_admin_select_all
+        # RLS policy (keyed on auth.jwt() ->> 'email' IN ADMIN_EMAILS) matches.
+        # The anon client carries no user identity, so it would see zero rows.
+        client = get_authenticated_supabase_client(access_token)
     except RuntimeError:
         # Supabase not configured (SUPABASE_URL / key missing). No fake data —
         # the admin renders its empty state.

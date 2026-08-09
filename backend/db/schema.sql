@@ -41,6 +41,40 @@
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
+-- discharge_summaries (Agent 1 OCR output — authoritative medication state)
+-- -----------------------------------------------------------------------------
+-- Stores the structured discharge summary extracted by /api/upload so Agent 3
+-- (teach-back) can re-read the patient's CURRENT medications on every chat
+-- message instead of trusting the frontend's cached state. This is the
+-- server-side half of the "stale Metformin" fix: a fresh upload writes a new
+-- row here, and prescription_lookup.fetch_latest_prescriptions reads the
+-- newest one (created_at desc, limit 1) to overlay onto the teach-back prompt.
+--
+-- The table is keyed by patient_id, which the backend sets to the validated
+-- Supabase auth uid — the same value the frontend sends to /api/teach-back. It
+-- is additive to the main patient schema (the header comment above documents
+-- that discharge_summaries is one of the cohort tables the project expects);
+-- this CREATE only provisions it if the project has not yet.
+--
+-- RLS is enabled with NO client-facing policies, so only the backend
+-- service-role client can read/write it (matching calendar_connection_secrets).
+-- The frontend never touches this table directly.
+CREATE TABLE IF NOT EXISTS discharge_summaries (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id     TEXT NOT NULL,
+    user_id        UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    diagnosis      TEXT,
+    medications    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    precautions    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    follow_up_date TEXT,
+    warning_signs  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    allergies      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE discharge_summaries ENABLE ROW LEVEL SECURITY;
+
+-- -----------------------------------------------------------------------------
 -- calendar_connections (Google Calendar connection metadata)
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS calendar_connections (

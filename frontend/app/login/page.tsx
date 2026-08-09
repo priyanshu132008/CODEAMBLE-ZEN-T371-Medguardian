@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -64,7 +63,6 @@ const ROLE_CONTEXT: Record<
 };
 
 export default function LoginPage() {
-  const router = useRouter();
   const { push, Toaster } = useToasts();
 
   const [role, setRole] = useState<AuthRole>('patient');
@@ -112,6 +110,16 @@ export default function LoginPage() {
   // role portal (or a deep ?redirect= target set by the middleware). Uses the
   // shared lib/session helpers so the Google OAuth callback finalizes the
   // session identically.
+  //
+  // The redirect is a HARD full-page navigation (window.location.assign), not a
+  // soft router.push. The App Router prefetches the gated /patient + /admin
+  // routes via <Link> on the home page while the user is still unauthenticated;
+  // proxy.ts returns a redirect-to-/login for those prefetches and the router
+  // caches the result. A soft router.push('/patient') after login can then
+  // serve the stale prefetched redirect, dropping the user back on /login until
+  // they click a second time. A hard navigation forces a fresh document request
+  // that carries the just-set medguardian_auth cookie and bypasses that cache —
+  // the same reason LogoutButton uses window.location.href on the way out.
   const finalizeSession = (session: AuthSession, title: string) => {
     persistSession(session);
     const dest = resolveDeepRedirect(session.role);
@@ -120,7 +128,7 @@ export default function LoginPage() {
       title,
       message: `Welcome, ${session.name}. Redirecting to ${dest}.`,
     });
-    setTimeout(() => router.push(dest), 850);
+    setTimeout(() => window.location.assign(dest), 850);
   };
 
   // Google OAuth sign-in (Patient tab only). Starts the real Supabase PKCE
@@ -192,7 +200,7 @@ export default function LoginPage() {
           }}
           className="text-white"
         >
-          <div className="p-7">
+          <div className="p-5 sm:p-7">
             {/* Role toggle — Patient vs Hospital Admin */}
             <p className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-500 mb-2">
               Select access tier
@@ -217,7 +225,7 @@ export default function LoginPage() {
                     )}
                   >
                     <Icon className={cn('h-6 w-6', active ? Rc.accent : 'text-slate-500')} />
-                    <span className={cn('text-xs font-semibold uppercase tracking-wide', active ? 'text-white' : 'text-slate-500')}>
+                    <span className={cn('text-xs font-semibold uppercase tracking-wide leading-tight text-center', active ? 'text-white' : 'text-slate-500')}>
                       {Rc.label}
                     </span>
                   </button>

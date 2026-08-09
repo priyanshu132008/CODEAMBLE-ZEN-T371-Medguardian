@@ -245,7 +245,10 @@ class PatientListEndpointTests(IsolatedAsyncioTestCase):
         with (
             patch("app.api.dependencies.get_supabase_client", return_value=auth_client),
             patch("app.api.dependencies.settings.is_admin_email", return_value=True),
-            patch("app.api.routers.patients.get_supabase_client", return_value=database_client),
+            # The admin listing reads through the authenticated client so the
+            # admin's JWT is forwarded to PostgREST and the patients_admin_select_all
+            # RLS policy matches — so mock the authenticated client, not the anon one.
+            patch("app.api.routers.patients.get_authenticated_supabase_client", return_value=database_client),
         ):
             response = await self.request({"Authorization": "Bearer valid-token"})
 

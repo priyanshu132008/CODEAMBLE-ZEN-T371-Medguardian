@@ -223,7 +223,7 @@ export default function PatientPage() {
     <div className="min-h-screen bg-[#fafbfc] text-slate-900 antialiased flex flex-col pb-12">
       {/* Patient Portal Header */}
       <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-50 px-4 py-3 sm:px-6 sm:py-4">
-        <div className="max-w-[1600px] mx-auto flex justify-between items-center gap-3">
+        <div className="max-w-[1600px] mx-auto flex flex-wrap justify-between items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <Link href="/" className="flex items-center gap-2 min-w-0">
               <span className="h-3 w-3 rounded-full bg-blue-600 animate-pulse shadow-[0_0_10px_rgba(37,99,235,0.6)] shrink-0" />
@@ -250,7 +250,7 @@ export default function PatientPage() {
 
       <main className="max-w-[1600px] w-full mx-auto p-4 md:p-6 lg:p-8 space-y-7 flex-1">
         {/* Friendly progress indicator (human labels, no "Agent N") */}
-        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <section className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           {[
             { label: 'Intake', done: !!extractedData, tone: 'bg-blue-500' },
             { label: 'Safety Check', done: !!extractedData, tone: 'bg-emerald-500' },
@@ -259,7 +259,7 @@ export default function PatientPage() {
           ].map((s) => (
             <div
               key={s.label}
-              className="flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm"
+              className="flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 sm:px-4 sm:py-3 shadow-sm"
             >
               <span className={`h-2.5 w-2.5 rounded-full ${s.tone} ${s.done ? '' : 'opacity-30'}`} />
               <span className={`text-sm font-semibold ${s.done ? 'text-slate-900' : 'text-slate-400'}`}>
@@ -290,8 +290,8 @@ export default function PatientPage() {
               <ComprehensionRing score={score} />
             </ScrollReveal>
 
-            {/* Workspace layout */}
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-7 items-start">
+            {/* Workspace layout — single column on mobile/tablet, 5/7 split at xl */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-7 items-start">
               {/* Left — My Medicines */}
               <div className="xl:col-span-5 space-y-6">
                 <ScrollReveal>
@@ -305,7 +305,7 @@ export default function PatientPage() {
               {/* Right — Voice Care Guide */}
               <div className="xl:col-span-7 space-y-6">
                 <ScrollReveal>
-                  <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-6 shadow-sm">
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                       <div>
                         <h3 className="text-lg font-semibold tracking-tight text-slate-900 flex items-center gap-2">
